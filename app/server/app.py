@@ -1392,7 +1392,7 @@ def merge_tiles(items):
         source = "mixed"
     else:
         source = "fallback"
-    return out, source
+    return out, source, from_menu
 
 
 def apps_of(items):
@@ -1661,7 +1661,7 @@ def collect_dashboard(client, dev_id):
     usage = _cpu_usage(client, istore)
     temp, freq = _temp_and_freq(client, istore)
     items = menu_of(client, dev_id)
-    tiles, menu_source = merge_tiles(items)
+    tiles, menu_source, from_menu = merge_tiles(items)
     apps = apps_of(items) or fallback_apps()
     home_path, home_label = home_of(client, items)
 
@@ -1723,7 +1723,7 @@ def collect_dashboard(client, dev_id):
         "history": history,
         "tiles": tiles,
         "apps": apps,
-        "menu": {"source": menu_source, "count": len(tiles),
+        "menu": {"source": menu_source, "count": len(tiles), "from_menu": from_menu,
                  "probes": [{"path": p.get("path"), "status": p.get("status"),
                              "bytes": p.get("bytes"), "items": p.get("items"),
                              "login_page": p.get("login_page")}

@@ -341,7 +341,7 @@
     var menu = data.menu || {};
     var hints = {
       menu: '来自路由器自己的菜单',
-      mixed: '路由器菜单 + 常用入口（菜单只认出 ' + (menu.count || 0) + ' 项）',
+      mixed: '路由器菜单 + 常用入口（菜单认出 ' + (menu.from_menu || 0) + ' 项，共 ' + (menu.count || 0) + ' 个入口）',
       fallback: '常用入口（未取到路由器菜单' + probeHint(menu) + '）'
     };
     var hint = hints[menu.source] || hints.menu;

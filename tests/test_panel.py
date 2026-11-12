@@ -119,7 +119,8 @@ class FakeRouter(BaseHTTPRequestHandler):
                 self._json({"jsonrpc": "2.0", "id": 1,
                             "error": {"code": -32002, "message": "session invalid"}})
                 return
-            data = self._ubus(obj, method)
+            params = payload["params"][3] if len(payload.get("params") or []) > 3 else {}
+            data = self._ubus(obj, method, params)
             if data is None:
                 self._json({"jsonrpc": "2.0", "id": 1, "result": [4, "denied"]})
                 return
@@ -146,7 +147,7 @@ class FakeRouter(BaseHTTPRequestHandler):
 
     # ---------- ubus 数据
 
-    def _ubus(self, obj, method):
+    def _ubus(self, obj, method, params=None):
         if (obj, method) == ("system", "board"):
             return {"model": "MiaoYi R3", "cpu": "ARMv8 Processor rev 4",
                     "release": {"description": "ImmortalWrt 25.12-SNAPSHOT", "distribution": "ImmortalWrt"}}
@@ -442,6 +443,7 @@ class PanelTestCase(unittest.TestCase):
         self.assertIn("/cgi-bin/luci/admin/network/firewall", paths)
         self.assertIn("/cgi-bin/luci/admin/system/system", paths)
         self.assertIn(dash["menu"]["source"], ("menu", "mixed"))
+        self.assertIn("from_menu", dash["menu"])
 
     def test_07_viewer_has_openwrt_home_button(self):
         """弹窗顶部要有「OpenWrt 首页」按钮，且指向 LuCI 原生首页。"""
