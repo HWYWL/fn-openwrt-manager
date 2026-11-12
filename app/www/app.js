@@ -22,6 +22,7 @@
     viewerLoaded: false,
     viewerDirect: false,
     viewIndex: 'panel',
+    noPanel: false,
     homePath: '/',
     panelTarget: null,
     panelTimer: null,
@@ -421,7 +422,9 @@
     stopPanelPolling();
     $('#viewer-panel').hidden = true;
     $('#viewer-frame-wrap').hidden = false;
-    $('#viewer-back').hidden = false;
+    var back = $('#viewer-back');
+    back.hidden = false;
+    back.textContent = state.noPanel ? '面板' : '← 面板';
     $('#viewer-home').hidden = true;
     $('#viewer-owrt').hidden = true;
     loadFrame(url, isDirect);
@@ -575,10 +578,16 @@
     };
     state.panelSeq = 0;
     state.viewerProxy = opts.proxy;
+    // 只有 OpenWrt/LuCI 设备才需要面板（面板数据要靠 LuCI 会话）；其他设备直接开页面
+    state.noPanel = String(opts.kind || '') !== 'openwrt';
     $('#viewer-title').textContent = opts.title || '路由器';
     $('#viewer-addr').textContent = opts.addr || '';
     $('#viewer-panel').innerHTML = '<div class="panel-loading">正在读取路由器状态…</div>';
     if (!dialog.open) dialog.showModal();
+    if (state.noPanel) {
+      openFrameFor('/');
+      return;
+    }
     showPanelView();
   }
 
@@ -617,7 +626,8 @@
     var proxied = proxyUrl(device);
 
     var meta = ' data-title="' + esc(title) + '" data-addr="' + esc(address) + '"' +
-      ' data-dev="' + esc((device.ip || '') + ':' + (device.port || 80)) + '"';
+      ' data-dev="' + esc((device.ip || '') + ':' + (device.port || 80)) + '"' +
+      ' data-kind="' + esc(kind) + '"';
     var actions = '<button type="button" class="btn primary tiny js-open" data-direct="' + esc(direct) +
       '" data-proxy="' + esc(proxied) + '"' + meta + ' title="先看面板，需要时再进 LuCI（Shift + 点击直接在新标签页打开）">' +
       ICONS.open + '打开面板' + (kind === 'openwrt' ? ' / LuCI' : '') + '</button>';
@@ -1046,6 +1056,7 @@
 
     function openFrom(el, event) {
       var opts = {
+        kind: el.dataset.kind || 'unknown',
         dev: el.dataset.dev,
         direct: el.dataset.direct,
         proxy: el.dataset.proxy,

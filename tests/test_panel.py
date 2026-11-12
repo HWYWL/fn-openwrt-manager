@@ -464,6 +464,19 @@ class PanelTestCase(unittest.TestCase):
         self.assertIn("/cgi-bin/luci/admin/status/overview", js)
         self.assertIn("viewer-owrt", js)
 
+    def test_07b_non_openwrt_skips_panel(self):
+        """非 OpenWrt 设备不进面板（不该弹账号密码），直接打开它的页面。"""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("GET", "/app.js")
+            resp = conn.getresponse()
+            js = resp.read().decode("utf-8")
+        finally:
+            conn.close()
+        self.assertIn('data-kind="', js)                 # 卡片把设备类型带到前端
+        self.assertIn("state.noPanel = String(opts.kind || '') !== 'openwrt'", js)
+        self.assertIn("if (state.noPanel) {", js)
+
     def test_08_fallback_tiles_exist_when_no_menu(self):
         """解析不到菜单时要有兜底入口，不能让面板只剩状态卡。"""
         self.assertEqual(self.app.parse_menu("<html><body>登录</body></html>"), [])
