@@ -384,6 +384,7 @@
     $('#viewer-frame-wrap').hidden = true;
     $('#viewer-back').hidden = true;
     $('#viewer-home').hidden = false;
+    $('#viewer-owrt').hidden = false;
     $('#viewer-loading').hidden = true;
     $('#viewer-hint').hidden = true;
     var tag = $('#viewer-mode');
@@ -400,6 +401,7 @@
     $('#viewer-frame-wrap').hidden = false;
     $('#viewer-back').hidden = false;
     $('#viewer-home').hidden = true;
+    $('#viewer-owrt').hidden = true;
     loadFrame(url, isDirect);
   }
 
@@ -910,6 +912,10 @@
       showPanelView();
     });
     $('#viewer-home').addEventListener('click', function () { openFrameFor('/'); });
+    // OpenWrt 原生首页 = LuCI 的状态总览，不是 iStoreOS 那套首页
+    $('#viewer-owrt').addEventListener('click', function () {
+      openFrameFor('/cgi-bin/luci/admin/status/overview');
+    });
     // 面板里的 tile / 应用入口 / 登录表单
     $('#viewer-panel').addEventListener('click', function (event) {
       var tile = event.target.closest('.js-tile');

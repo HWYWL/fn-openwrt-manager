@@ -959,7 +959,7 @@ class LuCiClient(object):
         self.port = port
         self.scheme = scheme
         self.base = "%s://%s:%d" % (scheme, ip, port)
-        self.cookie = ""
+        self.cookies = {}
         self.stok = ""
         self.sid = ""
         self.rpc_path = ""
@@ -967,14 +967,22 @@ class LuCiClient(object):
 
     # ---------- 底层
 
+    def cookie_header(self):
+        return "; ".join("%s=%s" % (name, value) for name, value in self.cookies.items())
+
+    @property
+    def cookie(self):
+        return self.cookie_header()
+
     def _http(self, method, path, body=None, headers=None, timeout=8.0):
         if self.scheme == "https":
             conn = http.client.HTTPSConnection(self.ip, self.port, timeout=timeout, context=SSL_CTX)
         else:
             conn = http.client.HTTPConnection(self.ip, self.port, timeout=timeout)
         hdrs = {"User-Agent": UA, "Accept": "*/*"}
-        if self.cookie:
-            hdrs["Cookie"] = self.cookie
+        cookie = self.cookie_header()
+        if cookie:
+            hdrs["Cookie"] = cookie
         hdrs.update(headers or {})
         try:
             conn.request(method, path, body=body, headers=hdrs)
@@ -982,10 +990,14 @@ class LuCiClient(object):
             data = resp.read()
             status = resp.status
             rheaders = resp.getheaders()
-            if not self.cookie:
-                for key, value in rheaders:
-                    if key.lower() == "set-cookie" and value.lower().startswith("sysauth"):
-                        self.cookie = value.split(";")[0].strip()
+            # 收集**所有** sysauth* cookie：部分固件会下发多个，只发第一个会掉页面登录态
+            for key, value in rheaders:
+                if key.lower() != "set-cookie":
+                    continue
+                pair = value.split(";")[0].strip()
+                name, _, val = pair.partition("=")
+                if name.lower().startswith("sysauth") and val:
+                    self.cookies[name] = val
             return status, rheaders, data
         finally:
             try:
@@ -994,7 +1006,7 @@ class LuCiClient(object):
                 pass
 
     def login(self, username, password):
-        self.cookie = ""
+        self.cookies = {}
         self.stok = ""
         self.sid = ""
         self.rpc_path = ""
@@ -1004,7 +1016,7 @@ class LuCiClient(object):
             {"Content-Type": "application/x-www-form-urlencoded",
              "Referer": self.base + "/cgi-bin/luci/"},
         )
-        if not self.cookie:
+        if not self.cookies:
             log("%s 登录失败：没有拿到 sysauth cookie (HTTP %s)" % (self.base, status))
             return False
         for key, value in headers:
@@ -1243,7 +1255,9 @@ def menu_of(client, dev_id):
             continue
         text = data.decode("utf-8", "ignore")
         items = parse_menu(text)
-        probes.append({"path": path, "status": status, "bytes": len(text), "items": len(items)})
+        probes.append({"path": path, "status": status, "bytes": len(text), "items": len(items),
+                       "login_page": "luci_username" in text,
+                       "cookies": len(client.cookies)})
         if len(items) > len(best):
             best = items
         if len(best) >= 6:

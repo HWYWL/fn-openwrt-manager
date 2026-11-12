@@ -72,7 +72,11 @@ class FakeRouter(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         for key, value in (extra or {}).items():
-            self.send_header(key, value)
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    self.send_header(key, item)
+            else:
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -90,8 +94,11 @@ class FakeRouter(BaseHTTPRequestHandler):
             if "luci_password=" + PASSWORD not in form:
                 self._send(302, "", extra={"Location": "/cgi-bin/luci/"})
                 return
+            # 真实固件可能同时下发多个 sysauth* cookie，两个都要带上
+            # 真实固件可能一次下发多个 sysauth* cookie，客户端要把它们都带上
             self._send(302, "", extra={
-                "Set-Cookie": "sysauth_http=deadbeefcafe; path=/cgi-bin/luci",
+                "Set-Cookie": ["sysauth_http=deadbeefcafe; path=/cgi-bin/luci",
+                               "sysauth_extra=cafebabe; path=/cgi-bin/luci"],
                 "Location": "/cgi-bin/luci/;stok=deadbeef/admin/status/overview",
             })
             return
@@ -326,6 +333,15 @@ class PanelTestCase(unittest.TestCase):
         self.assertTrue(FakeRouter.cookies_seen, "中转请求应带上登录 cookie")
         self.assertIn("sysauth_http=deadbeefcafe", FakeRouter.cookies_seen[-1])
 
+    def test_05b_all_sysauth_cookies_are_sent(self):
+        """登录后要把收集到的 sysauth* cookie 一起发（掉一个就可能拿到登录页）。"""
+        self.login()
+        FakeRouter.cookies_seen = []
+        self.dashboard()
+        joined = " ".join(FakeRouter.cookies_seen)
+        self.assertIn("sysauth_http=deadbeefcafe", joined)
+        self.assertIn("sysauth_extra=cafebabe", joined)
+
     def test_06_menu_parsing_is_tolerant(self):
         """单引号、/;stok=/ 前缀、相对路径都要认出来；退出/非路由器链接要过滤。"""
         html = """
@@ -344,7 +360,28 @@ class PanelTestCase(unittest.TestCase):
         ])
         self.assertEqual([i["label"] for i in items], ["网络", "状态总览", "系统"])
 
-    def test_07_fallback_tiles_exist_when_no_menu(self):
+    def test_07_viewer_has_openwrt_home_button(self):
+        """弹窗顶部要有「OpenWrt 首页」按钮，且指向 LuCI 原生首页。"""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("GET", "/")
+            resp = conn.getresponse()
+            html = resp.read().decode("utf-8")
+        finally:
+            conn.close()
+        self.assertIn('id="viewer-owrt"', html)
+        self.assertIn("OpenWrt 首页", html)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("GET", "/app.js")
+            resp = conn.getresponse()
+            js = resp.read().decode("utf-8")
+        finally:
+            conn.close()
+        self.assertIn("/cgi-bin/luci/admin/status/overview", js)
+        self.assertIn("viewer-owrt", js)
+
+    def test_08_fallback_tiles_exist_when_no_menu(self):
         """解析不到菜单时要有兜底入口，不能让面板只剩状态卡。"""
         self.assertEqual(self.app.parse_menu("<html><body>登录</body></html>"), [])
         tiles = self.app.fallback_tiles()
@@ -353,7 +390,7 @@ class PanelTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(apps), 2)
         self.assertTrue(all(t["path"].startswith("/cgi-bin/luci/") for t in tiles))
 
-    def test_08_clear_credentials(self):
+    def test_09_clear_credentials(self):
         self.login()
         status, _data = self.call("DELETE", "/api/router/login?id=" + self.dev_id)
         self.assertEqual(status, 200)
