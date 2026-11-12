@@ -333,7 +333,9 @@
         '<i class="pic ' + esc(t.color || 'n') + '">' + panelIcon(t.icon) + '</i><span>' +
         esc(t.label) + '</span></button>';
     }).join('');
-    return '<div class="panel-sec">快捷操作<span class="panel-sec-hint">来自路由器自己的菜单</span></div>' +
+    var fallback = (data.menu || {}).source === 'fallback';
+    return '<div class="panel-sec">快捷操作<span class="panel-sec-hint">' +
+      (fallback ? '默认入口（未取到路由器菜单）' : '来自路由器自己的菜单') + '</span></div>' +
       '<div class="panel-tiles">' + body + '</div>';
   }
 

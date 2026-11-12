@@ -326,7 +326,34 @@ class PanelTestCase(unittest.TestCase):
         self.assertTrue(FakeRouter.cookies_seen, "中转请求应带上登录 cookie")
         self.assertIn("sysauth_http=deadbeefcafe", FakeRouter.cookies_seen[-1])
 
-    def test_06_clear_credentials(self):
+    def test_06_menu_parsing_is_tolerant(self):
+        """单引号、/;stok=/ 前缀、相对路径都要认出来；退出/非路由器链接要过滤。"""
+        html = """
+        <a href='/cgi-bin/luci/;stok=abc123/admin/network/network'><span>网络</span></a>
+        <a href="/cgi-bin/luci/admin/status/overview?x=1">状态总览</a>
+        <a href=admin/system/system>系统</a>
+        <a href="/cgi-bin/luci/admin/logout">退出</a>
+        <a href="/cgi-bin/luci/admin/translations">语言</a>
+        <a href="https://example.com/foo">外链</a>
+        """
+        items = self.app.parse_menu(html)
+        self.assertEqual([i["path"] for i in items], [
+            "/cgi-bin/luci/admin/network/network",
+            "/cgi-bin/luci/admin/status/overview",
+            "/cgi-bin/luci/admin/system/system",
+        ])
+        self.assertEqual([i["label"] for i in items], ["网络", "状态总览", "系统"])
+
+    def test_07_fallback_tiles_exist_when_no_menu(self):
+        """解析不到菜单时要有兜底入口，不能让面板只剩状态卡。"""
+        self.assertEqual(self.app.parse_menu("<html><body>登录</body></html>"), [])
+        tiles = self.app.fallback_tiles()
+        apps = self.app.fallback_apps()
+        self.assertGreaterEqual(len(tiles), 8)
+        self.assertGreaterEqual(len(apps), 2)
+        self.assertTrue(all(t["path"].startswith("/cgi-bin/luci/") for t in tiles))
+
+    def test_08_clear_credentials(self):
         self.login()
         status, _data = self.call("DELETE", "/api/router/login?id=" + self.dev_id)
         self.assertEqual(status, 200)

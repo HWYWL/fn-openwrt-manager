@@ -1126,14 +1126,50 @@ APP_RULES = [
     ("files", "文件管理", ("/nas", "/filebrowser", "/filemanager"), "w", "folder", "浏览路由器上的文件"),
 ]
 
-MENU_LINK = re.compile(r'<a\b[^>]*href="(/cgi-bin/luci/[^"#]*)"[^>]*>(.*?)</a>', re.S | re.I)
+ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.S | re.I)
+HREF_ATTR_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""", re.I)
+# 老式 LuCI 的菜单链接带 /;stok=xxx/，归一化时要剥掉
+STOK_RE = re.compile(r"/;stok=[0-9a-zA-Z]+")
 TAG_RE = re.compile(r"<[^>]+>")
 SKIP_MENU = ("/cgi-bin/luci/admin/logout", "/cgi-bin/luci/admin/reboot", "/cgi-bin/luci/admin/translations")
 
 MENU_CACHE_TTL = 10 * 60
 CONNTRACK_TTL = 15
 MENU_CACHE = {}
+MENU_DEBUG = {}
 CONNTRACK_CACHE = {}
+
+# 取不到路由器菜单时的兜底入口（常见 LuCI 页面；不做探测，点不到就是路由器自己的 404）
+FALLBACK_TILES = [
+    ("/cgi-bin/luci/admin/status/overview", "状态总览", "grid", "g"),
+    ("/cgi-bin/luci/admin/network/network", "网络", "swap", "b"),
+    ("/cgi-bin/luci/admin/network/wireless", "无线", "wifi", "b"),
+    ("/cgi-bin/luci/admin/network/firewall", "防火墙", "shield", "w"),
+    ("/cgi-bin/luci/admin/network/dhcp", "DHCP/DNS", "list", "n"),
+    ("/cgi-bin/luci/admin/system/system", "系统", "cpu", "n"),
+    ("/cgi-bin/luci/admin/status/logs", "系统日志", "log", "n"),
+    ("/cgi-bin/luci/admin/status/realtime/bandwidth", "实时流量", "wave", "b"),
+    ("/cgi-bin/luci/admin/status/processes", "进程", "cpu", "n"),
+    ("/cgi-bin/luci/admin/system/admin", "管理权", "tool", "n"),
+    ("/cgi-bin/luci/admin/system/flash", "备份/升级", "tool", "n"),
+    ("/cgi-bin/luci/admin/status/routes", "路由表", "link", "p"),
+]
+
+FALLBACK_APPS = [
+    ("/cgi-bin/luci/admin/store/", "iStore 商店", "g", "bag", "浏览与安装路由器插件"),
+    ("/cgi-bin/luci/admin/docker/", "Docker", "b", "box", "容器与镜像管理"),
+    ("/cgi-bin/luci/admin/nas/", "文件管理", "w", "folder", "浏览路由器上的文件"),
+]
+
+
+def fallback_tiles():
+    return [{"id": path.rstrip("/").rsplit("/", 1)[-1] or "root", "label": label, "path": path,
+             "icon": icon, "color": color} for path, label, icon, color in FALLBACK_TILES]
+
+
+def fallback_apps():
+    return [{"id": label, "label": label, "desc": desc, "path": path, "icon": icon, "color": color}
+            for path, label, color, icon, desc in FALLBACK_APPS]
 
 
 def icon_for(path):
@@ -1148,13 +1184,37 @@ def icon_for(path):
     return "grid", "n"
 
 
+def normalize_menu_href(href):
+    """把菜单链接归一成 /cgi-bin/luci/admin/... 形式；不是路由器页面就返回空串。"""
+    value = (href or "").strip()
+    if not value or value.startswith("#") or value.lower().startswith("javascript:"):
+        return ""
+    value = value.split("#")[0].split("?")[0]
+    if "://" in value:
+        value = urlsplit(value).path
+    value = STOK_RE.sub("", value)
+    if value.startswith("admin/"):
+        value = "/cgi-bin/luci/" + value
+    elif value.startswith("/admin/"):
+        value = "/cgi-bin/luci" + value
+    if not value.startswith("/cgi-bin/luci/admin/"):
+        return ""
+    return value
+
+
 def parse_menu(html):
-    """从 LuCI 页面侧边栏里抽出真实菜单项（名称 + 路径）。"""
+    """从 LuCI 页面侧边栏里抽出真实菜单项（名称 + 路径）。
+
+    容错：href 单双引号都认；/;stok=xxx/ 前缀会剥掉；相对与绝对地址都认。
+    """
     items = []
     seen = set()
-    for href, inner in MENU_LINK.findall(html or ""):
-        path = href.split("?")[0]
-        if path in seen or not path.startswith("/cgi-bin/luci/admin"):
+    for attrs, inner in ANCHOR_RE.findall(html or ""):
+        match = HREF_ATTR_RE.search(attrs)
+        if not match:
+            continue
+        path = normalize_menu_href(match.group(1) or match.group(2) or match.group(3) or "")
+        if not path or path in seen:
             continue
         if any(path.startswith(skip) for skip in SKIP_MENU):
             continue
@@ -1173,15 +1233,26 @@ def menu_of(client, dev_id):
     cached = MENU_CACHE.get(dev_id)
     if cached and now - cached[0] < MENU_CACHE_TTL:
         return cached[1]
-    items = []
-    for path in ("/cgi-bin/luci/admin/status/overview", "/cgi-bin/luci/"):
-        status, _headers, data = client._http("GET", path)
-        if status == 200:
-            items = parse_menu(data.decode("utf-8", "ignore"))
-        if items:
+    best = []
+    probes = []
+    for path in ("/cgi-bin/luci/admin/status/overview", "/cgi-bin/luci/", "/cgi-bin/luci/admin/"):
+        try:
+            status, _headers, data = client._http("GET", path)
+        except Exception as exc:  # noqa: BLE001
+            probes.append({"path": path, "error": repr(exc)})
+            continue
+        text = data.decode("utf-8", "ignore")
+        items = parse_menu(text)
+        probes.append({"path": path, "status": status, "bytes": len(text), "items": len(items)})
+        if len(items) > len(best):
+            best = items
+        if len(best) >= 6:
             break
-    MENU_CACHE[dev_id] = (now, items)
-    return items
+    MENU_CACHE[dev_id] = (now, best)
+    MENU_DEBUG[dev_id] = {"probes": probes, "count": len(best), "sample": [i["path"] for i in best[:5]]}
+    if not best:
+        log("未从 %s 解析到 LuCI 菜单：%s" % (dev_id, probes))
+    return best
 
 
 def apps_of(items):
@@ -1450,6 +1521,10 @@ def collect_dashboard(client, dev_id):
     usage = _cpu_usage(client, istore)
     temp, freq = _temp_and_freq(client, istore)
     items = menu_of(client, dev_id)
+    if items:
+        tiles, apps, menu_source = items, apps_of(items), "menu"
+    else:
+        tiles, apps, menu_source = fallback_tiles(), fallback_apps(), "fallback"
 
     wan = _wan_of(dump) or {}
     wan_dev = str(wan.get("l3_device") or wan.get("device") or "")
@@ -1507,8 +1582,9 @@ def collect_dashboard(client, dev_id):
         "clients": {"dhcp": len(leases), "wireless": wireless, "conntrack": conntrack},
         "rate": rate,
         "history": history,
-        "tiles": items,
-        "apps": apps_of(items),
+        "tiles": tiles,
+        "apps": apps,
+        "menu": {"source": menu_source, "count": len(tiles)},
     }
 
 
@@ -1839,6 +1915,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"entries": proxy_log_snapshot()})
         if path == "/api/router/auth":
             return self._json({"devices": credentials_status()})
+        if path == "/api/router/menu":
+            dev_id = (parse_qs(query or "").get("id") or [""])[0].strip()
+            if not dev_id:
+                return self._error(400, "缺少设备标识")
+            client, reason = get_client(dev_id)
+            if client is None:
+                return self._json({"authed": False, "error": reason})
+            items = menu_of(client, dev_id)
+            return self._json({"authed": True, "count": len(items), "items": items,
+                               "debug": MENU_DEBUG.get(dev_id, {})})
         if path == "/api/router/dashboard":
             dev_id = (parse_qs(query or "").get("id") or [""])[0].strip()
             if not dev_id:
