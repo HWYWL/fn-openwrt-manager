@@ -337,10 +337,24 @@
         '<i class="pic ' + esc(t.color || 'n') + '">' + panelIcon(t.icon) + '</i><span>' +
         esc(t.label) + '</span></button>';
     }).join('');
-    var fallback = (data.menu || {}).source === 'fallback';
-    return '<div class="panel-sec">快捷操作<span class="panel-sec-hint">' +
-      (fallback ? '默认入口（未取到路由器菜单）' : '来自路由器自己的菜单') + '</span></div>' +
-      '<div class="panel-tiles">' + body + '</div>';
+    var menu = data.menu || {};
+    var fallback = menu.source === 'fallback';
+    var hint = fallback ? '默认入口（未取到路由器菜单' + probeHint(menu) + '）' : '来自路由器自己的菜单';
+    return '<div class="panel-sec">快捷操作<span class="panel-sec-hint" title="' + esc(hint) + '">' +
+      esc(hint) + '</span></div><div class="panel-tiles">' + body + '</div>';
+  }
+
+  // 把服务端探测到的「哪一页、什么状态、多少字节、解析出几条」压成一行，便于反馈问题
+  function probeHint(menu) {
+    var probes = menu.probes || [];
+    if (!probes.length) return '';
+    var parts = probes.map(function (p) {
+      if (p.error) return p.path + ' ERR';
+      return p.path.replace('/cgi-bin/luci', '') + ' ' + p.status + '/' +
+        (p.bytes ? Math.round(p.bytes / 1024) + 'KB' : '0') + '/' +
+        (p.items || 0) + '条' + (p.login_page ? '(登录页)' : '');
+    });
+    return '：' + parts.join('，');
   }
 
   function panelAppsHtml(data) {

@@ -1151,6 +1151,7 @@ MENU_CACHE_TTL = 10 * 60
 CONNTRACK_TTL = 15
 MENU_CACHE = {}
 MENU_DEBUG = {}
+HOME_DEBUG = {}
 CONNTRACK_CACHE = {}
 
 # 取不到路由器菜单时的兜底入口（常见 LuCI 页面；不做探测，点不到就是路由器自己的 404）
@@ -1276,8 +1277,10 @@ HOME_LABELS = ("首页", "主页", "home", "dashboard")
 # 找不到明确首页时退回 `/`，交给路由器自己决定落哪（不硬说「概览就是首页」）。
 HOME_CANDIDATES = (
     "/cgi-bin/luci/admin/quickstart",
+    "/cgi-bin/luci/admin/quickstart/",
     "/cgi-bin/luci/admin/home",
     "/cgi-bin/luci/admin/istoreos",
+    "/cgi-bin/luci/admin/istoreos/",
 )
 
 
@@ -1289,13 +1292,18 @@ def home_of(client, items):
         low = label.lower()
         if low in HOME_LABELS or "quickstart" in path or path.rstrip("/").endswith("/home"):
             return path, label or "首页"
+    probes = []
     for path in HOME_CANDIDATES:
         try:
-            status, _headers, _data = client._http("GET", path, timeout=5.0)
-        except Exception:  # noqa: BLE001
+            status, _headers, data = client._http("GET", path, timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            probes.append({"path": path, "error": repr(exc)})
             continue
+        probes.append({"path": path, "status": status, "bytes": len(data)})
         if status == 200:
+            HOME_DEBUG[client.base] = probes
             return path, "首页"
+    HOME_DEBUG[client.base] = probes
     return "/", "首页"
 
 
@@ -1629,7 +1637,12 @@ def collect_dashboard(client, dev_id):
         "history": history,
         "tiles": tiles,
         "apps": apps,
-        "menu": {"source": menu_source, "count": len(tiles)},
+        "menu": {"source": menu_source, "count": len(tiles),
+                 "probes": [{"path": p.get("path"), "status": p.get("status"),
+                             "bytes": p.get("bytes"), "items": p.get("items"),
+                             "login_page": p.get("login_page")}
+                            for p in (MENU_DEBUG.get(dev_id, {}).get("probes") or [])],
+                 "home_probes": HOME_DEBUG.get(client.base) or []},
         "home": {"path": home_path, "label": home_label},
     }
 
