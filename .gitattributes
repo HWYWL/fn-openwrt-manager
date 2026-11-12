@@ -1,0 +1,7 @@
+# 这个仓库的产物会部署到 Linux（飞牛 NAS），文本文件统一用 LF，
+# 避免 Windows 上 core.autocrlf=true 时 checkout 出 CRLF 的 cmd/* 脚本导致启动失败。
+* text=auto eol=lf
+
+*.png binary
+*.PNG binary
+*.fpk binary

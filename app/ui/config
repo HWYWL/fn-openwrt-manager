@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "fn-openwrt-manager.Application": {
+            "title": "iStore路由管理",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "8199",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}

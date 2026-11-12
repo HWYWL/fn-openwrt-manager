@@ -1,0 +1,11 @@
+appname               = fn-openwrt-manager
+version               = 1.0.6
+display_name          = iStore路由管理
+desc                  = 自动扫描内网 OpenWrt / iStoreOS 路由器，支持手动添加地址，一键打开 LuCI 管理页面（需与路由器同一局域网）
+platform              = all
+source                = thirdparty
+maintainer            = 一叶秋枫
+distributor           = 一叶秋枫
+desktop_uidir         = ui
+desktop_applaunchname = fn-openwrt-manager.Application
+service_port          = 8199

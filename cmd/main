@@ -1,0 +1,162 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+APP_ROOT="${TRIM_APPDEST:-/var/apps/fn-openwrt-manager/target}"
+WWW_DIR="${APP_ROOT}/www"
+SERVER_PY="${APP_ROOT}/server/app.py"
+DATA_DIR="${TRIM_PKGVAR}/data"
+PORT="${TRIM_SERVICE_PORT:-8199}"
+
+mkdir -p "${DATA_DIR}" 2>/dev/null
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+}
+
+# 飞牛自带 python3，也兼容用户自行安装的托管 Python 运行时
+find_python() {
+    local p
+    for p in "${APP_ROOT}/runtime/bin/python3" \
+             /var/apps/python312/target/bin/python3 \
+             /var/apps/python311/target/bin/python3 \
+             /var/apps/python310/target/bin/python3 \
+             /usr/bin/python3 \
+             /usr/local/bin/python3; do
+        if [ -x "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    command -v python3 2>/dev/null
+}
+
+PY_BIN="$(find_python)"
+
+CMD=""
+if [ -n "${PY_BIN}" ] && [ -f "${SERVER_PY}" ]; then
+    CMD="exec '${PY_BIN}' '${SERVER_PY}'"
+fi
+
+export APP_PORT="${PORT}"
+export APP_WWW_DIR="${WWW_DIR}"
+export APP_DATA_DIR="${DATA_DIR}"
+export APP_VERSION="${TRIM_APPVER:-1.0.0}"
+
+start_process() {
+    if status; then
+        return 0
+    fi
+
+    if [ -z "${PY_BIN}" ]; then
+        log_msg "错误: 未找到 python3，无法启动服务"
+        echo "未找到 python3，无法启动服务" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        return 1
+    fi
+
+    if [ ! -f "${SERVER_PY}" ]; then
+        log_msg "错误: 服务文件不存在 ${SERVER_PY}"
+        echo "服务文件不存在: ${SERVER_PY}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        return 1
+    fi
+
+    log_msg "Starting process ... python=${PY_BIN} port=${PORT} www=${WWW_DIR} data=${DATA_DIR}"
+    bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
+    printf "%s" "$!" > ${PID_FILE}
+
+    sleep 2
+    if ! check_process "$(cat ${PID_FILE} 2>/dev/null)"; then
+        log_msg "进程启动失败，请查看 ${LOG_FILE}"
+        echo "服务启动失败，请查看日志: ${LOG_FILE}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        rm -f "${PID_FILE}"
+        return 1
+    fi
+    # 检查端口是否已监听，便于定位端口占用问题
+    if command -v ss >/dev/null 2>&1; then
+        log_msg "listen: $(ss -ltnp 2>/dev/null | grep -c ":${PORT} ")"
+    fi
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping process ..."
+
+    if [ -r "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        
+        log_msg "pid=${pid}"
+        if ! check_process "${pid}"; then
+            # process not exist, delete pidfile
+            rm -f "${PID_FILE}"
+            log_msg "remove pid file 1"
+            return
+        fi
+
+        log_msg "send TERM signal to PID:${pid}..."
+        kill -TERM ${pid} >> ${LOG_FILE} 2>&1
+
+        local count=0
+        while check_process "${pid}" && [ $count -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+            log_msg "waiting process terminal... (${count}s/10s)"
+        done
+
+        if check_process "${pid}"; then
+            log_msg "send KILL signal to PID:${pid}..."
+            kill -KILL "${pid}"
+            sleep 1
+            rm -f "${PID_FILE}"
+        else
+            log_msg "process killed... "
+        fi
+    fi
+
+    return 0
+}
+
+check_process() {
+    local pid=$1
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        return 0  # process exist
+    else
+        return 1  # process not exist
+    fi
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            return 0
+        else
+            # Process is not running but pidfile exists - clean it up
+            rm -f "${PID_FILE}"
+        fi    
+    fi
+
+    return 1
+}
+
+case $1 in
+start)
+    # run start command. exit 0 if success, exit 1 if failed
+    start_process
+    ;;
+stop)
+    # run stop command. exit 0 if success, exit 1 if failed
+    stop_process
+    ;;
+status)
+    # check application status command. exit 0 if running, exit 3 if not running
+    if status; then 
+        exit 0
+    else 
+        exit 3
+    fi
+    ;;
+*)
+    exit 1
+    ;;
+esac

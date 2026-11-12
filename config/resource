@@ -1,0 +1,12 @@
+{
+  "data-share": {
+    "shares": [
+      {
+        "name": "fn-openwrt-manager"
+      },
+      {
+        "name": "fn-openwrt-manager/data"
+      }
+    ]
+  }
+}

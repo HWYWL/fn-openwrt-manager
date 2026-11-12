@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 本地运行时数据（app.py 的 APP_DATA_DIR 默认值）
+data/
+.tmpdata/
+
+# 打包产物
+*.fpk
