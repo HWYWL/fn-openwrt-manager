@@ -223,7 +223,7 @@
     function pathOf(index) {
       return points.map(function (p, i) {
         var x = (i / (points.length - 1)) * 320;
-        var y = 60 - Math.min(58, (p[index] / max) * 56);
+        var y = 58 - Math.min(54, (p[index] / max) * 54);
         return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
       }).join(' ');
     }
@@ -250,14 +250,12 @@
     var hasForm = !!box.querySelector('#panel-login-form');
     if (!data.authed && hasForm) return;   // 正在输密码，不要被轮询刷掉
     var scrollTop = box.scrollTop;
-
     var dev = (state.panelTarget && state.panelTarget.dev) || '';
     var html = '';
 
     if (!data.authed) {
       html += '<div class="panel-note"><b>未连接</b><span>' +
         esc(data.error || '还没有保存这台路由器的账号密码') + '</span></div>' + panelLoginForm(dev);
-      html += panelTilesHtml(data, true) + panelAppsHtml(data);
       box.innerHTML = html;
       box.scrollTop = scrollTop;
       return;
@@ -265,12 +263,13 @@
 
     var board = data.board || {};
     var memory = data.memory || {};
-    var storage = data.storage || {};
+    var disks = data.disks || [];
     var wan = data.wan || {};
     var rate = data.rate || null;
     var load = (data.system && data.system.load) || [];
     var cpu = data.cpu || {};
     var clients = data.clients || {};
+    var disk = disks[0] || null;
 
     html += '<div class="panel-sec">运行状态<span class="panel-sec-hint">每 3 秒刷新</span></div>';
     html += '<div class="panel-stats">';
@@ -279,21 +278,24 @@
       '<div><b>' + fmtRate(rate && rate.up) + '</b><small>↑</small></div></div>' +
       sparkline(data.history) +
       '<div class="panel-hint">' + (wan.iface ? esc(wan.iface) + ' · ' : '') +
-      (wan.ip ? esc(wan.ip) + ' · ' : '') + (wan.up ? '链路正常' : '链路断开') + '</div></div>';
+      (wan.proto ? esc(wan.proto) + ' · ' : '') + (wan.ip ? esc(wan.ip) + ' · ' : '') +
+      (wan.up ? '链路正常' : '链路断开') + '</div></div>';
     html += '<div class="panel-card"><h4>运行时长</h4><div class="panel-big">' +
       fmtUptime(data.system && data.system.uptime) + '</div>' +
-      '<div class="panel-kv"><span>负载 1/5/15</span><b>' + (load.length ? load.join(' / ') : '--') + '</b></div>' +
-      '<div class="panel-kv"><span>固件</span><b>' + esc(board.firmware || board.model || '--') + '</b></div></div>';
-    html += '<div class="panel-card"><h4>在线设备</h4><div class="panel-big">' + (clients.dhcp || 0) +
-      '<span> 台</span></div>' +
+      '<div class="panel-kv"><span>固件</span><b>' + esc(board.firmware || '--') + '</b></div>' +
+      '<div class="panel-kv"><span>内核</span><b>' + esc(board.kernel || '--') + '</b></div></div>';
+    html += '<div class="panel-card"><h4>在线设备</h4><div class="panel-big">' +
+      ((clients.dhcp || 0) + (clients.wireless || 0)) + '<span> 台</span></div>' +
       '<div class="panel-kv"><span>DHCP 租约</span><b>' + (clients.dhcp || 0) + '</b></div>' +
-      '<div class="panel-kv"><span>WAN 状态</span><b>' + (wan.up ? '已连接' : '未连接') + '</b></div></div>';
+      '<div class="panel-kv"><span>无线客户端</span><b>' + (clients.wireless || 0) + '</b></div>' +
+      '<div class="panel-kv"><span>连接数</span><b>' + (clients.conntrack || 0) + '</b></div></div>';
     html += '</div>';
 
     html += '<div class="panel-sec">系统资源</div><div class="panel-res">';
     html += '<div class="panel-card"><h4>处理器</h4><div class="panel-big">' +
-      (load.length ? Number(load[0]).toFixed(2) : '--') + '<span> 负载 1m</span></div>' +
-      '<div class="panel-bar g"><i style="width:' + Math.min(100, Math.max(2, (Number(load[0]) || 0) * 100)) + '%"></i></div>' +
+      (cpu.usage == null ? '--' : cpu.usage + '%') + '</div>' +
+      '<div class="panel-bar g"><i style="width:' + Math.min(100, Math.max(2, cpu.usage || 0)) + '%"></i></div>' +
+      '<div class="panel-kv"><span>负载 1/5/15</span><b>' + (load.length ? load.join(' / ') : '--') + '</b></div>' +
       '<div class="panel-kv"><span>温度 / 频率</span><b>' + (cpu.temp != null ? cpu.temp + '℃' : '--') +
       ' / ' + (cpu.freq ? cpu.freq + 'MHz' : '--') + '</b></div>' +
       '<div class="panel-kv"><span>型号</span><b>' + esc(board.cpu || board.model || '--') + '</b></div></div>';
@@ -301,38 +303,46 @@
       '<div class="panel-bar b"><i style="width:' + Math.min(100, memory.pct || 0) + '%"></i></div>' +
       '<div class="panel-kv"><span>已用 / 总量</span><b>' + fmtBytes(memory.used) + ' / ' + fmtBytes(memory.total) + '</b></div>' +
       '<div class="panel-kv"><span>可用</span><b>' + fmtBytes(memory.available) + '</b></div></div>';
-    html += '<div class="panel-card"><h4>存储</h4><div class="panel-big">' + (storage.pct || 0) + '%</div>' +
-      '<div class="panel-bar p"><i style="width:' + Math.min(100, storage.pct || 0) + '%"></i></div>' +
-      '<div class="panel-kv"><span>根分区</span><b>' + fmtBytes(storage.used) + ' / ' + fmtBytes(storage.total) + '</b></div>' +
-      '<div class="panel-kv"><span>剩余</span><b>' + fmtBytes(storage.free) + '</b></div></div>';
+    html += '<div class="panel-card"><h4>存储</h4><div class="panel-big">' +
+      (disk ? disk.pct + '%' : '--') + '</div>' +
+      '<div class="panel-bar p"><i style="width:' + Math.min(100, (disk && disk.pct) || 0) + '%"></i></div>' +
+      (disk
+        ? '<div class="panel-kv"><span>' + esc(disk.mount || '/') + '（' + esc(disk.fs || 'disk') + '）</span><b>' +
+          fmtBytes(disk.used) + ' / ' + fmtBytes(disk.total) + '</b></div>' +
+          (disks[1]
+            ? '<div class="panel-kv"><span>' + esc(disks[1].mount || '') + '</span><b>' +
+              fmtBytes(disks[1].used) + ' / ' + fmtBytes(disks[1].total) + '</b></div>'
+            : '<div class="panel-kv"><span>剩余</span><b>' + fmtBytes(disk.free) + '</b></div>')
+        : '<div class="panel-kv"><span>挂载点</span><b>--</b></div>') +
+      '</div>';
     html += '</div>';
 
-    html += panelTilesHtml(data, true) + panelAppsHtml(data);
+    html += panelTilesHtml(data) + panelAppsHtml(data);
     box.innerHTML = html;
     box.scrollTop = scrollTop;
   }
 
-  function panelTilesHtml(data, enabled) {
+  function panelTilesHtml(data) {
     var tiles = data.tiles || [];
     if (!tiles.length) return '';
     var body = tiles.map(function (t) {
       var off = t.available === false;
       return '<button type="button" class="panel-tile js-tile' + (off ? ' off' : '') + '"' +
         ' data-path="' + esc(t.path) + '" data-label="' + esc(t.label) + '"' +
-        (off || !enabled ? ' disabled' : '') + ' title="' + esc(off ? t.label + '（路由器上未安装）' : t.label) + '">' +
-        '<i class="pic ' + esc(t.color || 'n') + '">' + panelIcon(t.icon) + '</i><span>' + esc(t.label) + '</span></button>';
+        (off ? ' disabled' : '') + ' title="' + esc(t.label) + '">' +
+        '<i class="pic ' + esc(t.color || 'n') + '">' + panelIcon(t.icon) + '</i><span>' +
+        esc(t.label) + '</span></button>';
     }).join('');
-    return '<div class="panel-sec">快捷操作</div><div class="panel-tiles">' + body + '</div>';
+    return '<div class="panel-sec">快捷操作<span class="panel-sec-hint">来自路由器自己的菜单</span></div>' +
+      '<div class="panel-tiles">' + body + '</div>';
   }
 
   function panelAppsHtml(data) {
     var apps = data.apps || [];
     if (!apps.length) return '';
     var body = apps.map(function (a) {
-      var off = a.available === false;
-      return '<button type="button" class="panel-app js-tile' + (off ? ' off' : '') + '"' +
-        ' data-path="' + esc(a.path) + '" data-label="' + esc(a.label) + '"' +
-        (off ? ' disabled' : '') + '>' +
+      return '<button type="button" class="panel-app js-tile" data-path="' + esc(a.path) +
+        '" data-label="' + esc(a.label) + '">' +
         '<i class="pic ' + esc(a.color || 'n') + '">' + panelIcon(a.icon) + '</i>' +
         '<span><strong>' + esc(a.label) + '</strong><em>' + esc(a.desc || '') + '</em></span></button>';
     }).join('');

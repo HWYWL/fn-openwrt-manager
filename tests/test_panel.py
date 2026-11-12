@@ -2,11 +2,16 @@
 # -*- coding: utf-8 -*-
 """面板（弹窗第一屏）后端测试：LuCI 登录 → ubus 取数 → 聚合 → 中转带登录态。
 
-用一个假 LuCI 路由器模拟真实的四个环节：
-  1. POST /cgi-bin/luci/   表单登录 → 302 + Set-Cookie(sysauth) + Location(;stok=…)
-  2. GET  /cgi-bin/luci/   页面里带 "sessionid":"<32 hex>"
-  3. POST /ubus            JSON-RPC，按 params[1]/[2] 返回 system board/info 等
-  4. GET  /cgi-bin/luci/admin/...  探测 tile 是否存在（200 存在 / 404 未安装）
+假 LuCI 路由器模拟真实链路，数据源与 iStore 项目一致：
+  1. POST /cgi-bin/luci/                表单登录 → 302 + Set-Cookie(sysauth) + Location(;stok=…)
+  2. GET  /cgi-bin/luci/                页面里带 "sessionid":"<32 hex>"
+  3. GET  /cgi-bin/luci/admin/status/overview   侧边栏菜单（tiles 来源）
+  4. POST /ubus                         JSON-RPC：
+       system board/info（load 为 65536 定点数）、network.interface dump、
+       luci-rpc getNetworkDevices/getDHCPLeases/getWirelessDevices、
+       luci getMountPoints/getBlockDevices/getProcessList/getConntrackList
+  5. GET  /cgi-bin/luci/istore/system/status/   非 iStoreOS → 404
+  6. GET  /cgi-bin/luci/admin/...       tile 探测（200 存在 / 404 未安装）
 
 运行：python -m unittest discover -s tests -v
 """
@@ -30,13 +35,30 @@ WWW_DIR = os.path.join(ROOT, "app", "www")
 SID = "0123456789abcdef0123456789abcdef"
 PASSWORD = "s3cret"
 
+MENU_HTML = """<!DOCTYPE html><html><head>
+<script>L.env = {"sessionid":"%s","token":"t"};</script>
+</head><body>
+<div class="main menu">
+<ul>
+  <li><a href="/cgi-bin/luci/admin/status/overview">状态总览</a></li>
+  <li><a href="/cgi-bin/luci/admin/network/network">网络</a></li>
+  <li><a href="/cgi-bin/luci/admin/network/wireless">无线</a></li>
+  <li><a href="/cgi-bin/luci/admin/network/firewall">防火墙</a></li>
+  <li><a href="/cgi-bin/luci/admin/status/logs">系统日志</a></li>
+  <li><a href="/cgi-bin/luci/admin/system/admin">管理权</a></li>
+  <li><a href="/cgi-bin/luci/admin/store/">iStore 商店</a></li>
+  <li><a href="/cgi-bin/luci/admin/docker/">Docker</a></li>
+  <li><a href="/cgi-bin/luci/admin/logout">退出</a></li>
+</ul>
+</div>
+</body></html>""" % SID
+
 
 class FakeRouter(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    rx_bytes = 1000
-    tx_bytes = 500
+    rx_bytes = 1000000
+    tx_bytes = 500000
     cookies_seen = []
-    logins = 0
 
     def log_message(self, *args):
         pass
@@ -65,7 +87,6 @@ class FakeRouter(BaseHTTPRequestHandler):
 
         if self.path.startswith("/cgi-bin/luci/") and "ubus" not in self.path:
             form = body.decode("utf-8", "ignore")
-            type(self).logins += 1
             if "luci_password=" + PASSWORD not in form:
                 self._send(302, "", extra={"Location": "/cgi-bin/luci/"})
                 return
@@ -89,7 +110,10 @@ class FakeRouter(BaseHTTPRequestHandler):
                             "error": {"code": -32002, "message": "session invalid"}})
                 return
             data = self._ubus(obj, method)
-            self._json({"jsonrpc": "2.0", "id": 1, "result": [0, data] if data is not None else [4, "denied"]})
+            if data is None:
+                self._json({"jsonrpc": "2.0", "id": 1, "result": [4, "denied"]})
+                return
+            self._json({"jsonrpc": "2.0", "id": 1, "result": [0, data]})
             return
 
         self._send(404, "nope")
@@ -98,13 +122,11 @@ class FakeRouter(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         type(self).cookies_seen.append(self.headers.get("Cookie") or "")
         if path in ("/cgi-bin/luci/", "/cgi-bin/luci/admin/status/overview"):
-            self._send(200, '<html><head><script>L.env = {"sessionid":"%s","token":"t"};</script>'
-                            '</head><body>LuCI</body></html>' % SID)
+            self._send(200, MENU_HTML)
             return
         if path.startswith("/cgi-bin/luci/admin/"):
-            # 只有状态总览与网络管理"装了"，其它 404
-            if path in ("/cgi-bin/luci/admin/status/overview",
-                        "/cgi-bin/luci/admin/network/network"):
+            if path in ("/cgi-bin/luci/admin/network/network",
+                        "/cgi-bin/luci/admin/network/wireless"):
                 self._send(200, "<html>ok</html>")
             else:
                 self._send(404, "<html>404</html>")
@@ -115,22 +137,48 @@ class FakeRouter(BaseHTTPRequestHandler):
 
     def _ubus(self, obj, method):
         if (obj, method) == ("system", "board"):
-            return {"model": "MT7986A", "system": "MediaTek MT7986A",
-                    "release": {"description": "ImmortalWrt 24.10", "distribution": "ImmortalWrt"}}
+            return {"model": "MiaoYi R3", "cpu": "ARMv8 Processor rev 4",
+                    "release": {"description": "ImmortalWrt 25.12-SNAPSHOT", "distribution": "ImmortalWrt"}}
         if (obj, method) == ("system", "info"):
             return {"uptime": 190000, "kernelversion": "6.6.0",
-                    "load": [0.12, 0.18, 0.2],
+                    # ubus 的 load 是 65536 倍定点数：2816/65536=0.04，4192/65536=0.06
+                    "load": [2816, 2560, 4192],
                     "memory": {"total": 1073741824, "free": 400000000, "available": 787000000},
                     "root": {"total": 7340032000, "used": 2055208960, "free": 5284823040}}
         if (obj, method) == ("network.interface", "dump"):
             return {"interface": [{
-                "interface": "wan", "up": True, "proto": "pppoe", "l3_device": "pppoe-wan",
-                "ipv4-address": [{"address": "1.2.3.4", "mask": 32}],
-                "statistics": {"rx_bytes": type(self).rx_bytes, "tx_bytes": type(self).tx_bytes},
+                "interface": "wan", "up": True, "proto": "dhcp", "l3_device": "wan",
+                "ipv4-address": [{"address": "192.168.1.2", "mask": 24}],
+                # 故意全 0：证明速率不再依赖接口统计
+                "statistics": {"rx_bytes": 0, "tx_bytes": 0},
             }]}
-        if (obj, method) == ("dhcp", "ipv4leases"):
-            return {"device": {}, "leases": {"aa:bb:cc:dd:ee:ff": {"ip": "192.168.200.50"},
-                                             "11:22:33:44:55:66": {"ip": "192.168.200.51"}}}
+        if (obj, method) == ("luci-rpc", "getNetworkDevices"):
+            return {
+                "wan": {"up": True, "stats": {"rx_bytes": type(self).rx_bytes,
+                                              "tx_bytes": type(self).tx_bytes}},
+                "br-lan": {"up": True, "stats": {"rx_bytes": 999999, "tx_bytes": 999999}},
+                "lo": {"up": True, "stats": {"rx_bytes": 5, "tx_bytes": 5}},
+            }
+        if (obj, method) == ("luci-rpc", "getDHCPLeases"):
+            return {"dhcp_leases": [
+                {"macaddr": "aa:bb:cc:dd:ee:ff", "ipaddr": "192.168.1.50", "hostname": "phone", "expires": 3600},
+                {"macaddr": "11:22:33:44:55:66", "ipaddr": "192.168.1.51", "hostname": "tv", "expires": 7200},
+            ]}
+        if (obj, method) == ("luci-rpc", "getWirelessDevices"):
+            return {"radio0": {"interfaces": [{"ifname": "wlan0",
+                                               "assoclist": [{"mac": "aa"}, {"mac": "bb"}]}]}}
+        if (obj, method) == ("luci", "getMountPoints"):
+            return {"result": [
+                {"device": "/dev/mtdblock5", "mount": "/overlay", "size": 104857600,
+                 "free": 73400320, "avail": 73400320},
+                {"device": "tmpfs", "mount": "/tmp", "size": 1048576, "free": 524288, "avail": 524288},
+            ]}
+        if (obj, method) == ("luci", "getBlockDevices"):
+            return {"mtdblock5": {"dev": "/dev/mtdblock5", "type": "jffs2"}}
+        if (obj, method) == ("luci", "getProcessList"):
+            return {"result": [{"%CPU": "7%"}, {"%CPU": "5.5%"}, {"%CPU": "0%"}]}
+        if (obj, method) == ("luci", "getConntrackList"):
+            return {"result": [{"src": "1.1.1.1"} for _ in range(7)]}
         if (obj, method) == ("file", "read"):
             return None  # ACL 拒绝：温度/频率取不到，面板显示 --
         return None
@@ -174,7 +222,7 @@ class PanelTestCase(unittest.TestCase):
     # ---------- 工具
 
     def call(self, method, path, body=None):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
         try:
             headers = {"Content-Type": "application/json"} if body is not None else {}
             payload = json.dumps(body).encode() if body is not None else None
@@ -189,6 +237,10 @@ class PanelTestCase(unittest.TestCase):
         return self.call("POST", "/api/router/login",
                          {"id": self.dev_id, "username": "root", "password": password})
 
+    def dashboard(self):
+        self.app.DASH_CACHE.clear()
+        return self.call("GET", "/api/router/dashboard?id=" + self.dev_id)[1]
+
     # ---------- 用例
 
     def test_01_wrong_password_is_rejected(self):
@@ -197,45 +249,52 @@ class PanelTestCase(unittest.TestCase):
         self.assertIn("登录路由器失败", data.get("error", ""))
         self.assertEqual(self.app.credentials_status(), {})
 
-    def test_02_login_and_dashboard(self):
+    def test_02_dashboard_values_are_accurate(self):
         status, data = self.login()
         self.assertEqual(status, 200, data)
-        self.assertTrue(data.get("authed"))
-
-        self.app.DASH_CACHE.clear()
-        status, dash = self.call("GET", "/api/router/dashboard?id=" + self.dev_id)
-        self.assertEqual(status, 200, dash)
+        dash = self.dashboard()
         self.assertTrue(dash["authed"], dash)
-        self.assertEqual(dash["board"]["firmware"], "ImmortalWrt 24.10")
+
+        # 负载：ubus 定点数 65536 → 0.04 / 0.04 / 0.06
+        self.assertEqual(dash["system"]["load"], [0.04, 0.04, 0.06])
         self.assertEqual(dash["system"]["uptime"], 190000)
-        self.assertEqual(dash["system"]["load"], [0.12, 0.18, 0.2])
+        # CPU 使用率来自 luci getProcessList 求和
+        self.assertEqual(dash["cpu"]["usage"], 12.5)
+        self.assertIsNone(dash["cpu"]["temp"])
+        self.assertIsNone(dash["cpu"]["freq"])
+        # 内存
         self.assertGreater(dash["memory"]["pct"], 20)
         self.assertLess(dash["memory"]["pct"], 30)
-        self.assertEqual(dash["wan"]["iface"], "pppoe-wan")
-        self.assertEqual(dash["wan"]["ip"], "1.2.3.4")
+        # 存储：只算 /dev/*，tmpfs 被过滤
+        self.assertEqual(len(dash["disks"]), 1)
+        self.assertEqual(dash["disks"][0]["mount"], "/overlay")
+        self.assertEqual(dash["disks"][0]["fs"], "jffs2")
+        self.assertEqual(dash["disks"][0]["pct"], 30.0)
+        # 在线设备：DHCP 2 + 无线 2 + 连接数 7
+        self.assertEqual(dash["clients"], {"dhcp": 2, "wireless": 2, "conntrack": 7})
+        self.assertEqual(dash["wan"]["iface"], "wan")
+        self.assertEqual(dash["wan"]["ip"], "192.168.1.2")
         self.assertTrue(dash["wan"]["up"])
-        self.assertEqual(dash["clients"]["dhcp"], 2)
-        self.assertIsNone(dash["cpu"]["temp"])
-        # tile 可用性来自真实探测
-        tiles = {t["id"]: t["available"] for t in dash["tiles"]}
-        self.assertTrue(tiles["overview"])
-        self.assertTrue(tiles["network"])
-        self.assertFalse(tiles["firewall"])
-        apps = {a["id"]: a["available"] for a in dash["apps"]}
-        self.assertTrue(all(v is False for v in apps.values()), apps)
+        # tiles 来自路由器自己的菜单，退出被过滤
+        labels = [t["label"] for t in dash["tiles"]]
+        self.assertIn("状态总览", labels)
+        self.assertIn("网络", labels)
+        self.assertNotIn("退出", labels)
+        self.assertEqual(dash["tiles"][0]["path"], "/cgi-bin/luci/admin/status/overview")
+        self.assertEqual(dash["tiles"][0]["icon"], "grid")
+        # 应用与文件：在菜单里找到 iStore / Docker，没有文件管理就不出现
+        app_ids = [a["id"] for a in dash["apps"]]
+        self.assertEqual(app_ids, ["istore", "docker"])
 
-    def test_03_rate_and_history(self):
+    def test_03_rate_uses_device_counters(self):
         self.login()
-        self.app.DASH_CACHE.clear()
         self.app.RATE_STATE.pop(self.dev_id, None)
-        self.call("GET", "/api/router/dashboard?id=" + self.dev_id)
+        self.dashboard()
         fake = self.router.RequestHandlerClass
         fake.rx_bytes += 20480          # 20 KB
         fake.tx_bytes += 10240          # 10 KB
         time.sleep(1.2)
-        self.app.DASH_CACHE.clear()
-        status, dash = self.call("GET", "/api/router/dashboard?id=" + self.dev_id)
-        self.assertEqual(status, 200)
+        dash = self.dashboard()
         self.assertIsNotNone(dash["rate"], "第二次取样应算出速率")
         self.assertGreater(dash["rate"]["down"], 1024)
         self.assertGreater(dash["rate"]["up"], 512)
@@ -272,14 +331,10 @@ class PanelTestCase(unittest.TestCase):
         status, _data = self.call("DELETE", "/api/router/login?id=" + self.dev_id)
         self.assertEqual(status, 200)
         self.assertNotIn(self.dev_id, self.app.credentials_status())
-        self.app.DASH_CACHE.clear()
-        status, dash = self.call("GET", "/api/router/dashboard?id=" + self.dev_id)
-        self.assertEqual(status, 200)
+        dash = self.dashboard()
         self.assertFalse(dash["authed"])
         self.assertIn("账号密码", dash["error"])
-        # 未登录也要给出 tiles（前端才能渲染入口）
-        self.assertTrue(dash["tiles"])
-        self.assertTrue(all(t["available"] is None for t in dash["tiles"]))
+        self.assertEqual(dash["tiles"], [])
 
 
 if __name__ == "__main__":

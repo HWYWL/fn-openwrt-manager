@@ -11,15 +11,24 @@
   内网里的其他 Web 服务不再混在列表里；每张卡片可点删除（忽略），下次扫描不再出现，
   需要时点「恢复已忽略」还原（忽略列表存 `TRIM_PKGVAR/data/ignored.json`）。
 - **手动添加**：支持 `192.168.1.1`、`192.168.1.1:8080`、`http://router.lan` 等写法，添加时即时探测。
-- **一键打开 → 面板**：点击卡片 / 按钮先在弹窗里打开「面板」——实时速率、运行时长、在线设备数、CPU/内存/存储、
-  12 个快捷操作（状态总览、网络、WiFi、防火墙、DHCP/DNS、系统、日志、终端、流量排行、连接跟踪、接口状态、系统维护）
-  以及 iStore / Docker / 文件入口；点任意一项就在**同一个弹窗里**切到对应 LuCI 页，顶部「← 面板」返回，
-  「LuCI 首页」直接进路由器首页；按住 `Shift`（或 `Ctrl`/`⌘`）点击卡片仍然直接在新标签页开 LuCI。
+- **一键打开 → 面板**：点击卡片 / 按钮先在弹窗里打开「面板」——实时速率、运行时长、在线设备数（DHCP + 无线 + 连接数）、
+  CPU 占用/负载/温度、内存、真实磁盘挂载点，加上**路由器自己菜单里的**快捷操作与 iStore / Docker / 文件入口；
+  点任意一项就在**同一个弹窗里**切到对应 LuCI 页，顶部「← 面板」返回，「LuCI 首页」直接进路由器首页；
+  按住 `Shift`（或 `Ctrl`/`⌘`）点击卡片仍然直接在新标签页开 LuCI。
 - **面板数据怎么取**：在面板里填一次路由器账号密码（存 `TRIM_PKGVAR/data/routers.json`，权限 `600`），
-  NAS 服务端表单登录 LuCI 拿会话，再用 ubus JSON-RPC 取 `system board/info`、`network.interface dump`、
-  `dhcp ipv4leases`；速率是两次采样字节差算出来的。顺带让**中转自动带上登录态**，弹窗里进 LuCI 不用再输密码。
-  取不到的项显示 `--`（比如 CPU 温度/频率需要 `file read` ACL）；CPU 占用用 1 分钟负载代替（没 `/proc/stat` 权限）。
-  tile 可用性由服务端探测（10 分钟缓存），路由器上没装的直接置灰。
+  NAS 服务端表单登录 LuCI 拿会话，再用 ubus JSON-RPC 取数（与 iStore 客户端同一条路）：
+  - `system info` 的 `load` 是 **65536 倍定点数**，除完才是真实负载；
+  - 速率用 `luci-rpc getNetworkDevices` 的**设备级字节数**两次采样算（`network.interface dump` 的
+    `statistics` 在不少固件上是 0，不再依赖它），历史保留 90 个点画曲线；
+  - CPU 占用：iStoreOS 的 `istore/system/status` → `luci getProcessList` 汇总 `%CPU` → `/proc/stat` 双采样；
+  - 在线设备：`luci-rpc getDHCPLeases`（降级 `/tmp/dhcp.leases`）+ `luci-rpc getWirelessDevices` 的
+    assoclist；连接数来自 `luci getConntrackList`（15 秒缓存）；
+  - 存储：`luci getMountPoints` + `getBlockDevices`，只统计 `/dev/*` 真实分区（过滤 tmpfs / overlayfs）；
+  - 温度/频率：iStoreOS quickstart 或 `/sys/class/thermal`、`scaling_cur_freq`，rpcd 没放行就显示 `--`。
+  顺带让**中转自动带上登录态**，弹窗里进 LuCI 不用再输密码。
+- **快捷操作来自路由器自己的菜单**：登录后抓一页 LuCI 的侧边栏（名称 + 路径，10 分钟缓存），所以你这台装了
+  哪些插件就显示哪些，点进去一定有；图标按路径关键字自动配。“应用与文件”从菜单里按路径识别 iStore / Docker /
+  文件管理，菜单里没有就不显示。
 - **弹窗内固定浅色**：弹窗的 iframe 上声明了 `color-scheme: only light`。iStoreOS 的 Argon 主题在
   `argon.global.mode=normal`（跟随系统）时把深色样式包在 `@media (prefers-color-scheme: dark)` 里，
   而现代浏览器会把**宿主页面（飞牛桌面窗口）的配色**传给内嵌文档，于是深色窗口里路由器页面会跟着变深色、

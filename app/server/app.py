@@ -1099,17 +1099,324 @@ def router_proxy_cookie(ip, port):
     return client.cookie if client else ""
 
 
-def _call_all(client, calls):
-    out = {}
-    for name, (obj, method) in calls.items():
-        try:
-            out[name] = client.call(obj, method)
-        except SessionExpired:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log("ubus %s.%s 异常: %r" % (obj, method, exc))
-            out[name] = None
+# 图标按 LuCI 路径关键字挑（先去掉 /cgi-bin/luci/admin 前缀再匹配，菜单驱动的 tiles 才有像样的图标）
+ICON_RULES = [
+    ("/store", "bag", "g"), ("/istore", "bag", "g"),
+    ("/docker", "box", "b"),
+    ("/nas", "folder", "w"), ("/filebrowser", "folder", "w"), ("/filemanager", "folder", "w"),
+    ("/wireless", "wifi", "b"), ("/wifi", "wifi", "b"),
+    ("/firewall", "shield", "w"),
+    ("/dhcp", "list", "n"), ("/dns", "list", "n"), ("/hosts", "list", "n"),
+    ("/nlbwmon", "chart", "p"), ("/statistics", "chart", "p"),
+    ("/conntrack", "link", "n"),
+    ("/realtime", "wave", "b"), ("/ports", "wave", "b"),
+    ("/logs", "log", "n"), ("/log", "log", "n"),
+    ("/terminal", "term", "p"), ("/ttyd", "term", "p"), ("/ssh", "term", "p"),
+    ("/flash", "tool", "n"), ("/backup", "tool", "n"),
+    ("/admin", "tool", "n"),
+    ("/processes", "cpu", "n"), ("/system", "cpu", "n"),
+    ("/network", "swap", "b"),
+    ("/status", "grid", "g"), ("/overview", "grid", "g"),
+]
+
+# 面板底部的「应用与文件」：在路由器菜单里按路径关键字找，找不到就不显示
+APP_RULES = [
+    ("istore", "iStore 商店", ("/store", "/istore"), "g", "bag", "浏览与安装路由器插件"),
+    ("docker", "Docker", ("/docker",), "b", "box", "容器与镜像管理"),
+    ("files", "文件管理", ("/nas", "/filebrowser", "/filemanager"), "w", "folder", "浏览路由器上的文件"),
+]
+
+MENU_LINK = re.compile(r'<a\b[^>]*href="(/cgi-bin/luci/[^"#]*)"[^>]*>(.*?)</a>', re.S | re.I)
+TAG_RE = re.compile(r"<[^>]+>")
+SKIP_MENU = ("/cgi-bin/luci/admin/logout", "/cgi-bin/luci/admin/reboot", "/cgi-bin/luci/admin/translations")
+
+MENU_CACHE_TTL = 10 * 60
+CONNTRACK_TTL = 15
+MENU_CACHE = {}
+CONNTRACK_CACHE = {}
+
+
+def icon_for(path):
+    low = (path or "").lower()
+    for prefix in ("/cgi-bin/luci/admin/", "/cgi-bin/luci/"):
+        if low.startswith(prefix):
+            low = "/" + low[len(prefix):]
+            break
+    for key, icon, color in ICON_RULES:
+        if key in low:
+            return icon, color
+    return "grid", "n"
+
+
+def parse_menu(html):
+    """从 LuCI 页面侧边栏里抽出真实菜单项（名称 + 路径）。"""
+    items = []
+    seen = set()
+    for href, inner in MENU_LINK.findall(html or ""):
+        path = href.split("?")[0]
+        if path in seen or not path.startswith("/cgi-bin/luci/admin"):
+            continue
+        if any(path.startswith(skip) for skip in SKIP_MENU):
+            continue
+        label = re.sub(r"\s+", " ", TAG_RE.sub("", inner)).strip()
+        if not label or len(label) > 24:
+            continue
+        seen.add(path)
+        icon, color = icon_for(path)
+        items.append({"id": path.rstrip("/").rsplit("/", 1)[-1] or "root", "label": label,
+                      "path": path, "icon": icon, "color": color})
+    return items
+
+
+def menu_of(client, dev_id):
+    now = time.time()
+    cached = MENU_CACHE.get(dev_id)
+    if cached and now - cached[0] < MENU_CACHE_TTL:
+        return cached[1]
+    items = []
+    for path in ("/cgi-bin/luci/admin/status/overview", "/cgi-bin/luci/"):
+        status, _headers, data = client._http("GET", path)
+        if status == 200:
+            items = parse_menu(data.decode("utf-8", "ignore"))
+        if items:
+            break
+    MENU_CACHE[dev_id] = (now, items)
+    return items
+
+
+def apps_of(items):
+    out = []
+    for app_id, label, keywords, color, icon, desc in APP_RULES:
+        for item in items:
+            path = item["path"].lower()
+            if any(key in path for key in keywords):
+                out.append({"id": app_id, "label": label, "desc": desc,
+                            "path": item["path"], "color": color, "icon": icon})
+                break
     return out
+
+
+def _num_pair(stats):
+    return _num(stats, "rx_bytes", default=0) or 0, _num(stats, "tx_bytes", default=0) or 0
+
+
+def dev_stats(client):
+    """设备级收发字节（luci-rpc getNetworkDevices）：比 network.interface dump 准。"""
+    data = client.call("luci-rpc", "getNetworkDevices") or {}
+    stats = {}
+    if isinstance(data, dict):
+        for name, dev in data.items():
+            if not isinstance(dev, dict):
+                continue
+            rx, tx = _num_pair(dev.get("stats") or {})
+            if rx or tx:
+                stats[str(name)] = (rx, tx)
+    return stats
+
+
+def iface_stats(client):
+    """逻辑接口统计（兜底），顺带返回 dump 供找 WAN 用。"""
+    dump = client.call("network.interface", "dump") or {}
+    out = {}
+    for item in (dump.get("interface") or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("l3_device") or item.get("device") or item.get("interface") or "")
+        rx, tx = _num_pair(item.get("statistics") or {})
+        if name and (rx or tx):
+            out[name] = (rx, tx)
+    return out, dump
+
+
+def _rate_of(dev_id, key, stats):
+    now = time.time()
+    rate = None
+    with RATE_LOCK:
+        prev = RATE_STATE.get(dev_id)
+        RATE_STATE[dev_id] = (now, stats)
+        hist = RATE_HISTORY.setdefault(dev_id, collections.deque(maxlen=90))
+        if prev is not None and key in stats:
+            dt = now - prev[0]
+            old = prev[1].get(key)
+            if old is not None and dt > 0.2:
+                rate = {
+                    "down": max(0.0, (stats[key][0] - old[0]) / dt),
+                    "up": max(0.0, (stats[key][1] - old[1]) / dt),
+                }
+                hist.append([int(now), round(rate["down"]), round(rate["up"])])
+        return rate, list(hist)
+
+
+def _istore_status(client):
+    """iStoreOS 的 quickstart 系统状态（非 iStoreOS 返回空 dict）。"""
+    status, _headers, data = client._http("GET", "/cgi-bin/luci/istore/system/status/")
+    if status != 200:
+        return {}
+    try:
+        parsed = json.loads(data.decode("utf-8", "ignore")) or {}
+    except ValueError:
+        return {}
+    inner = parsed.get("result")
+    return inner if isinstance(inner, dict) else {}
+
+
+def _cpu_usage(client, istore):
+    """CPU 占用：iStoreOS quickstart → luci getProcessList 求和 → /proc/stat 双采样。"""
+    value = _num(istore, "cpuUsage", default=None)
+    if value is not None:
+        return round(float(value), 1)
+    procs = client.call("luci", "getProcessList") or {}
+    rows = procs.get("result") if isinstance(procs, dict) else None
+    if isinstance(rows, list) and rows:
+        total = 0.0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get("%CPU") or row.get("cpu") or "").replace("%", "").strip()
+            try:
+                total += float(raw)
+            except ValueError:
+                continue
+        if total > 0:
+            return round(min(100.0, total), 1)
+
+    def parse(text):
+        for line in str(text or "").split("\n"):
+            if not line.startswith("cpu "):
+                continue
+            parts = [int(x) for x in line.split()[1:] if x.isdigit()]
+            if len(parts) < 4:
+                return None
+            return sum(parts), parts[3]
+        return None
+
+    first = parse((client.call("file", "read", {"path": "/proc/stat"}) or {}).get("data"))
+    time.sleep(0.6)
+    second = parse((client.call("file", "read", {"path": "/proc/stat"}) or {}).get("data"))
+    if first and second:
+        delta_total = second[0] - first[0]
+        delta_idle = second[1] - first[1]
+        if delta_total > 0:
+            return round(min(100.0, max(0.0, (delta_total - delta_idle) * 100.0 / delta_total)), 1)
+    return None
+
+
+def _temp_and_freq(client, istore):
+    temp = _num(istore, "cpuTemperature", default=None)
+    temp = round(float(temp), 1) if temp else None
+    if temp is None:
+        for zone in ("thermal_zone0", "thermal_zone1", "thermal_zone2"):
+            raw = (client.call("file", "read", {"path": "/sys/class/thermal/%s/temp" % zone}) or {}).get("data")
+            if not raw:
+                continue
+            try:
+                milli = int(str(raw).strip())
+            except ValueError:
+                continue
+            if milli > 0:
+                temp = round(milli / 1000.0, 1)
+                break
+    freq = None
+    for path in ("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+                 "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq"):
+        raw = (client.call("file", "read", {"path": path}) or {}).get("data")
+        if not raw:
+            continue
+        try:
+            khz = int(str(raw).strip())
+        except ValueError:
+            continue
+        if khz > 0:
+            freq = int(khz / 1000)
+            break
+    return temp, freq
+
+
+def _leases(client):
+    """DHCP 租约：luci-rpc getDHCPLeases，拿不到再解析 /tmp/dhcp.leases。"""
+    data = client.call("luci-rpc", "getDHCPLeases") or {}
+    rows = data.get("dhcp_leases") if isinstance(data, dict) else None
+    out = []
+    for row in (rows or []):
+        if isinstance(row, dict):
+            out.append({"mac": str(row.get("macaddr") or ""), "ip": str(row.get("ipaddr") or ""),
+                        "name": str(row.get("hostname") or "")})
+    if out:
+        return out
+    text = (client.call("file", "read", {"path": "/tmp/dhcp.leases"}) or {}).get("data")
+    for line in str(text or "").split("\n"):
+        toks = line.split()
+        if len(toks) < 4:
+            continue
+        out.append({"mac": toks[1], "ip": toks[2], "name": "" if toks[3] == "*" else toks[3]})
+    return out
+
+
+def _wireless_clients(client):
+    data = client.call("luci-rpc", "getWirelessDevices") or {}
+    total = 0
+    if not isinstance(data, dict):
+        return 0
+    for radio in data.values():
+        if not isinstance(radio, dict):
+            continue
+        for iface in (radio.get("interfaces") or []):
+            if not isinstance(iface, dict):
+                continue
+            assoc = iface.get("assoclist")
+            if isinstance(assoc, (list, dict)):
+                total += len(assoc)
+    return total
+
+
+def _conntrack_count(client, dev_id):
+    now = time.time()
+    cached = CONNTRACK_CACHE.get(dev_id)
+    if cached and now - cached[0] < CONNTRACK_TTL:
+        return cached[1]
+    data = client.call("luci", "getConntrackList") or {}
+    rows = data.get("result") if isinstance(data, dict) else None
+    count = len(rows) if isinstance(rows, list) else 0
+    CONNTRACK_CACHE[dev_id] = (now, count)
+    return count
+
+
+def _disks(client):
+    """真实挂载点：luci getMountPoints（只算 /dev/* 设备），文件系统类型取自 getBlockDevices。"""
+    types = {}
+    blocks = client.call("luci", "getBlockDevices") or {}
+    if isinstance(blocks, dict):
+        for block in blocks.values():
+            if isinstance(block, dict) and block.get("dev") and block.get("type"):
+                types[str(block["dev"])] = str(block["type"])
+    mounts = client.call("luci", "getMountPoints") or {}
+    rows = mounts.get("result") if isinstance(mounts, dict) else None
+    disks = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        device = str(row.get("device") or "")
+        if not device.startswith("/dev/"):
+            continue
+        total = _num(row, "size", default=0) or 0
+        free = _num(row, "free", default=0) or 0
+        avail = _num(row, "avail", default=free)
+        if avail is None:
+            avail = free
+        if total <= 0:
+            continue
+        used = max(0, total - free)
+        disks.append({
+            "mount": str(row.get("mount") or ""),
+            "device": device,
+            "fs": types.get(device, ""),
+            "total": int(total),
+            "used": int(used),
+            "free": int(avail),
+            "pct": round(used * 100.0 / total, 1),
+        })
+    disks.sort(key=lambda disk: (0 if disk["mount"] == "/" else 1, -disk["total"]))
+    return disks
 
 
 def _wan_of(dump):
@@ -1126,84 +1433,83 @@ def _wan_of(dump):
         if name.endswith("_6") or name.endswith("_4"):
             continue
         if item.get("up"):
-            best = item
-            break
+            return item
         best = best or item
     return best
 
 
-def _leases_count(leases):
-    if not isinstance(leases, dict):
-        return 0
-    table = leases.get("leases")
-    if isinstance(table, dict):
-        return len(table)
-    if isinstance(table, list):
-        return len(table)
-    return 0
+def collect_dashboard(client, dev_id):
+    board = client.call("system", "board") or {}
+    info = client.call("system", "info") or {}
+    fallback_stats, dump = iface_stats(client)
+    istore = _istore_status(client)
+    leases = _leases(client)
+    disks = _disks(client)
+    wireless = _wireless_clients(client)
+    conntrack = _conntrack_count(client, dev_id)
+    usage = _cpu_usage(client, istore)
+    temp, freq = _temp_and_freq(client, istore)
+    items = menu_of(client, dev_id)
 
+    wan = _wan_of(dump) or {}
+    wan_dev = str(wan.get("l3_device") or wan.get("device") or "")
+    stats = dev_stats(client) or fallback_stats
+    if wan_dev and wan_dev in stats:
+        rate_key = wan_dev
+    elif stats:
+        rate_key = next(iter(stats))
+    else:
+        rate_key = ""
+    rate, history = _rate_of(dev_id, rate_key, stats)
 
-def _update_rate(dev_id, rx, tx):
-    now = time.time()
-    rate = None
-    with RATE_LOCK:
-        prev = RATE_STATE.get(dev_id)
-        RATE_STATE[dev_id] = (now, rx, tx)
-        hist = RATE_HISTORY.setdefault(dev_id, collections.deque(maxlen=90))
-        if prev is not None:
-            dt = now - prev[0]
-            if dt > 0.15:
-                rate = {
-                    "down": max(0.0, (rx - prev[1]) / dt),
-                    "up": max(0.0, (tx - prev[2]) / dt),
-                }
-                hist.append([int(now), round(rate["down"]), round(rate["up"])])
-        return rate, list(hist)
+    memory = info.get("memory") or {}
+    mem_total = _num(memory, "total", default=0) or 0
+    mem_avail = _num(memory, "available", default=None)
+    if mem_avail is None:
+        mem_avail = _num(memory, "free", default=0) or 0
+    load = []
+    load_raw = info.get("load") or []
+    if isinstance(load_raw, list):
+        for value in load_raw[:3]:
+            try:
+                # ubus 的 load 是 65536 倍定点数（iStore 项目同样先除再展示）
+                load.append(round(float(value) / 65536.0, 2))
+            except (TypeError, ValueError):
+                load.append(0.0)
+    release = board.get("release") or {}
+    ipv4 = wan.get("ipv4-address") or []
+    wan_ip = ""
+    if isinstance(ipv4, list) and ipv4 and isinstance(ipv4[0], dict):
+        wan_ip = str(ipv4[0].get("address") or "")
 
-
-def _temp_and_freq(client):
-    temp = None
-    freq = None
-    for zone in ("thermal_zone0", "thermal_zone1", "thermal_zone2"):
-        data = client.call("file", "read", {"path": "/sys/class/thermal/%s/temp" % zone})
-        raw = (data or {}).get("data") if isinstance(data, dict) else None
-        if not raw:
-            continue
-        try:
-            value = int(str(raw).strip())
-        except ValueError:
-            continue
-        temp = round(value / 1000.0, 1) if value > 1000 else float(value)
-        break
-    data = client.call("file", "read", {"path": "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"})
-    raw = (data or {}).get("data") if isinstance(data, dict) else None
-    if raw:
-        try:
-            freq = int(int(str(raw).strip()) / 1000)
-        except ValueError:
-            freq = None
-    return temp, freq
-
-
-def _tiles_with_availability(client, dev_id):
-    now = time.time()
-    cache = PROBE_CACHE.get(dev_id) or {}
-
-    def available(path):
-        entry = cache.get(path)
-        if not entry or now - entry[0] > TILE_PROBE_TTL:
-            entry = [now, client.probe(path)]
-            cache[path] = entry
-        return entry[1]
-
-    tiles = [{"id": tile_id, "label": label, "path": path, "color": color,
-              "icon": icon, "available": available(path)}
-             for tile_id, label, path, color, icon in PANEL_TILES]
-    apps = [{"id": app_id, "label": label, "path": path, "color": color,
-             "icon": icon, "desc": desc, "available": available(path)}
-            for app_id, label, path, color, icon, desc in PANEL_APPS]
-    PROBE_CACHE[dev_id] = cache
-    return tiles, apps
+    return {
+        "board": {
+            "model": str(board.get("model") or ""),
+            "cpu": str(board.get("cpu") or ""),
+            "firmware": str(release.get("description") or release.get("distribution") or ""),
+            "kernel": str(info.get("kernelversion") or ""),
+        },
+        "system": {"uptime": int(_num(info, "uptime", default=0) or 0), "load": load},
+        "cpu": {"usage": usage, "temp": temp, "freq": freq},
+        "memory": {
+            "total": mem_total,
+            "available": mem_avail,
+            "used": max(0, mem_total - mem_avail),
+            "pct": round((mem_total - mem_avail) * 100.0 / mem_total, 1) if mem_total else 0,
+        },
+        "disks": disks,
+        "wan": {
+            "iface": wan_dev or str(wan.get("interface") or ""),
+            "proto": str(wan.get("proto") or ""),
+            "ip": wan_ip,
+            "up": bool(wan.get("up")),
+        },
+        "clients": {"dhcp": len(leases), "wireless": wireless, "conntrack": conntrack},
+        "rate": rate,
+        "history": history,
+        "tiles": items,
+        "apps": apps_of(items),
+    }
 
 
 def build_dashboard(dev_id):
@@ -1212,100 +1518,25 @@ def build_dashboard(dev_id):
     if cached and now - cached[0] < DASH_CACHE_TTL:
         return cached[1]
 
-    base = {"id": dev_id, "authed": False, "error": "", "ts": int(now),
-            "tiles": [{"id": t[0], "label": t[1], "path": t[2], "color": t[3],
-                       "icon": t[4], "available": None} for t in PANEL_TILES],
-            "apps": [{"id": a[0], "label": a[1], "path": a[2], "color": a[3],
-                      "icon": a[4], "desc": a[5], "available": None} for a in PANEL_APPS]}
+    base = {"id": dev_id, "authed": False, "error": "", "ts": int(now), "tiles": [], "apps": []}
     client, reason = get_client(dev_id)
     if client is None:
         base["error"] = reason
         return base
 
     try:
-        raw = _call_all(client, {
-            "board": ("system", "board"),
-            "info": ("system", "info"),
-            "ifaces": ("network.interface", "dump"),
-            "leases": ("dhcp", "ipv4leases"),
-        })
+        data = collect_dashboard(client, dev_id)
     except SessionExpired:
         drop_session(dev_id)
         client, reason = get_client(dev_id, force=True)
         if client is None:
             base["error"] = reason or "会话已过期，请重新保存账号密码"
             return base
-        raw = _call_all(client, {
-            "board": ("system", "board"),
-            "info": ("system", "info"),
-            "ifaces": ("network.interface", "dump"),
-            "leases": ("dhcp", "ipv4leases"),
-        })
+        data = collect_dashboard(client, dev_id)
 
-    board = raw.get("board") or {}
-    info = raw.get("info") or {}
-    wan = _wan_of(raw.get("ifaces")) or {}
-    stats = wan.get("statistics") or {}
-    rx = _num(stats, "rx_bytes", default=0) or 0
-
-    rate, history = _update_rate(dev_id, rx, _num(stats, "tx_bytes", default=0) or 0)
-    temp, freq = _temp_and_freq(client)
-    tiles, apps = _tiles_with_availability(client, dev_id)
-
-    memory = info.get("memory") or {}
-    mem_total = _num(memory, "total", default=0) or 0
-    mem_free = _num(memory, "free", default=0) or 0
-    mem_avail = _num(memory, "available", default=mem_free) or mem_free
-    root = info.get("root") or {}
-    load = info.get("load") or []
-    if not isinstance(load, list):
-        load = []
-    leases = raw.get("leases") or {}
-    release = board.get("release") or {}
-    ipv4 = wan.get("ipv4-address") or []
-    wan_ip = ""
-    if isinstance(ipv4, list) and ipv4 and isinstance(ipv4[0], dict):
-        wan_ip = str(ipv4[0].get("address") or "")
-
-    base.update({
-        "authed": True,
-        "error": "",
-        "board": {
-            "model": str(board.get("model") or ""),
-            "cpu": str(board.get("cpu") or board.get("system") or ""),
-            "firmware": str(release.get("description") or release.get("distribution") or ""),
-            "kernel": str(info.get("kernelversion") or ""),
-        },
-        "system": {
-            "uptime": int(_num(info, "uptime", default=0) or 0),
-            "load": [round(float(x), 2) if isinstance(x, (int, float)) else 0 for x in load[:3]],
-        },
-        "memory": {
-            "total": mem_total, "free": mem_free, "available": mem_avail,
-            "used": max(0, mem_total - mem_avail),
-            "pct": round((mem_total - mem_avail) * 100.0 / mem_total, 1) if mem_total else 0,
-        },
-        "storage": {
-            "total": _num(root, "total", default=0) or 0,
-            "used": _num(root, "used", default=0) or 0,
-            "free": _num(root, "free", default=0) or 0,
-            "pct": round((_num(root, "used", default=0) or 0) * 100.0 / (_num(root, "total", default=0) or 1), 1),
-        },
-        "cpu": {"temp": temp, "freq": freq},
-        "wan": {
-            "iface": str(wan.get("l3_device") or wan.get("device") or wan.get("interface") or ""),
-            "proto": str(wan.get("proto") or ""),
-            "ip": wan_ip,
-            "up": bool(wan.get("up")),
-            "rx_bytes": rx,
-            "tx_bytes": _num(stats, "tx_bytes", default=0) or 0,
-        },
-        "clients": {"dhcp": _leases_count(leases)},
-        "rate": rate,
-        "history": history,
-        "tiles": tiles,
-        "apps": apps,
-    })
+    base.update(data)
+    base["authed"] = True
+    base["error"] = ""
     DASH_CACHE[dev_id] = (now, base)
     return base
 
