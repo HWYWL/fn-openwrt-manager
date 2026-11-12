@@ -94,6 +94,21 @@ fnpack build fn-openwrt-manager
 
 生成的 `fn-openwrt-manager.fpk` 在飞牛「应用中心 → 手动安装」上传即可。
 
+## 发布到 GitHub Releases
+
+```bash
+./scripts/release.sh --dry-run                 # 只打包 + 打印正文预览，不碰 GitHub
+./scripts/release.sh                           # 打 tag v<manifest.version> 并发版（附 .fpk）
+./scripts/release.sh --notes-file notes.md     # 用自定义说明（想写小红书风格就用这个）
+./scripts/release.sh --draft                   # 先发草稿，自己在网页上确认再发布
+```
+
+- tag 取 `manifest` 的 `version`（加 `v` 前缀），`--tag` 可覆盖；release 已存在时复用并替换同名附件
+- 正文默认由 `manifest` 的 `changelog` 自动生成（安装步骤 / 提示 / SHA256），想写得更生动就传 `--notes-file`
+- 凭据优先 `GH_TOKEN` / `GITHUB_TOKEN`，否则用 git 里已保存的 GitHub 凭据；token 不会打印
+- `fnpack` 不在 PATH 时：`FNPACK=/path/to/fnpack ./scripts/release.sh`
+- 注意：每次打包 tar 时间戳不同，产物的 SHA256 会变；发布正文里写的是当次产物的哈希
+
 ## 说明
 
 - NAS 上需要存在 `python3`（fnOS 系统自带，也兼容 `/var/apps/python312` 等托管运行时）。
