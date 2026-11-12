@@ -49,6 +49,8 @@ MENU_HTML = """<!DOCTYPE html><html><head>
   <li><a href="/cgi-bin/luci/admin/store/">iStore 商店</a></li>
   <li><a href="/cgi-bin/luci/admin/docker/">Docker</a></li>
   <li><a href="/cgi-bin/luci/admin/quickstart">首页</a></li>
+  <li><a href="/cgi-bin/luci/admin/linkease_status">linkease_status</a></li>
+  <li><a href="/cgi-bin/luci/admin/file">file</a></li>
   <li><a href="/cgi-bin/luci/admin/logout">退出</a></li>
 </ul>
 </div>
@@ -425,6 +427,21 @@ class PanelTestCase(unittest.TestCase):
         dash = self.dashboard()
         self.assertEqual(dash["home"]["path"], "/cgi-bin/luci/admin/quickstart")
         self.assertEqual(dash["home"]["label"], "首页")
+
+    def test_06e_menu_tiles_merge_with_common_entries(self):
+        """菜单只认出几项（还夹杂 linkease_status / file 这种）时，要用常用入口补齐。"""
+        self.login()
+        dash = self.dashboard()
+        paths = [t["path"] for t in dash["tiles"]]
+        # 代码味标签被过滤
+        self.assertNotIn("linkease_status", [t["label"] for t in dash["tiles"]])
+        self.assertNotIn("/cgi-bin/luci/admin/file", paths)
+        # 菜单里的真实项保留
+        self.assertIn("/cgi-bin/luci/admin/network/network", paths)
+        # 常用入口补齐（防火墙 mock 里没有）
+        self.assertIn("/cgi-bin/luci/admin/network/firewall", paths)
+        self.assertIn("/cgi-bin/luci/admin/system/system", paths)
+        self.assertIn(dash["menu"]["source"], ("menu", "mixed"))
 
     def test_07_viewer_has_openwrt_home_button(self):
         """弹窗顶部要有「OpenWrt 首页」按钮，且指向 LuCI 原生首页。"""

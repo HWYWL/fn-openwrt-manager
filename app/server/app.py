@@ -1253,10 +1253,13 @@ def scan_paths(html):
             continue
         if any(path.startswith(skip) for skip in SKIP_MENU) or path.count("/") < 4:
             continue
-        seen.add(path)
         segment = path.rstrip("/").rsplit("/", 1)[-1]
+        if segment not in SEGMENT_LABELS:
+            # 只保留认识的页面段（file / linkease_status 这种是接口，不是页面）
+            continue
+        seen.add(path)
         icon, color = icon_for(path)
-        items.append({"id": segment or "root", "label": SEGMENT_LABELS.get(segment, segment),
+        items.append({"id": segment or "root", "label": SEGMENT_LABELS[segment],
                       "path": path, "icon": icon, "color": color})
         if len(items) >= 24:
             break
@@ -1281,6 +1284,8 @@ def parse_menu(html):
             continue
         label = re.sub(r"\s+", " ", TAG_RE.sub("", inner)).strip()
         if not label or len(label) > 24:
+            continue
+        if re.match(r"^[a-z0-9_\-]+$", label) and label not in SEGMENT_LABELS:
             continue
         seen.add(path)
         icon, color = icon_for(path)
@@ -1364,6 +1369,30 @@ def home_of(client, items):
             return path, "首页"
     HOME_DEBUG[client.base] = probes
     return "/", "首页"
+
+
+def merge_tiles(items):
+    """菜单解析结果 + 常用入口兜底合并：菜单优先，重复的跳过，剩下的用常用入口补齐。"""
+    out = []
+    seen = set()
+    for item in items or []:
+        if item["path"] in seen:
+            continue
+        seen.add(item["path"])
+        out.append(item)
+    from_menu = len(out)
+    for tile in fallback_tiles():
+        if tile["path"] in seen:
+            continue
+        seen.add(tile["path"])
+        out.append(tile)
+    if from_menu >= 6:
+        source = "menu"
+    elif from_menu:
+        source = "mixed"
+    else:
+        source = "fallback"
+    return out, source
 
 
 def apps_of(items):
@@ -1632,10 +1661,8 @@ def collect_dashboard(client, dev_id):
     usage = _cpu_usage(client, istore)
     temp, freq = _temp_and_freq(client, istore)
     items = menu_of(client, dev_id)
-    if items:
-        tiles, apps, menu_source = items, apps_of(items), "menu"
-    else:
-        tiles, apps, menu_source = fallback_tiles(), fallback_apps(), "fallback"
+    tiles, menu_source = merge_tiles(items)
+    apps = apps_of(items) or fallback_apps()
     home_path, home_label = home_of(client, items)
 
     wan = _wan_of(dump) or {}
