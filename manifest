@@ -1,5 +1,5 @@
 appname               = fn-openwrt-manager
-version               = 1.2.4
+version               = 1.2.5
 display_name          = iStore路由管理
 desc                  = 自动扫描内网 OpenWrt / iStoreOS 路由器，支持手动添加地址，一键打开 LuCI 管理页面（需与路由器同一局域网）
 platform              = all
@@ -12,4 +12,4 @@ desktop_uidir         = ui
 desktop_applaunchname = fn-openwrt-manager.Application
 service_port          = 8199
 ctl_stop              = true
-changelog             = 1.2.4：首页探测补上 iStoreOS quickstart 的结尾斜杠变体；取不到菜单时把探测结果直接显示在面板上，便于定位；1.2.3：修复「LuCI 首页」跳到状态概览、以及中转页面里的绝对路径跳转落回本应用页面（服务端按 Referer 接回中转）；1.2.2：弹窗顶部新增「OpenWrt 首页」按钮（直达 LuCI 原生首页）；修复部分固件下发多个 sysauth cookie 时页面掉登录态、导致快捷操作退回默认入口；1.2.1：修复面板快捷操作与应用入口在部分固件上不显示（容错解析 LuCI 菜单并加默认入口）；1.2.0：面板数据改为与 iStore 客户端一致的口径（负载、速率、存储、在线设备），新增 CPU 占用、无线客户端、磁盘列表、连接数；1.1.0：点卡片先在弹窗里显示管理面板，需要时再进 LuCI
+changelog             = 1.2.5：修「弹窗里点路由器首页会掉出中转、落到本应用页面」——注入脚本点击前补中转前缀，服务端用 fn_proxy_target cookie 在无 Referer 时也能接回；菜单解析加全文扫描兜底；1.2.4：首页探测补上 iStoreOS quickstart 的结尾斜杠变体；取不到菜单时把探测结果直接显示在面板上，便于定位；1.2.3：修复「LuCI 首页」跳到状态概览、以及中转页面里的绝对路径跳转落回本应用页面（服务端按 Referer 接回中转）；1.2.2：弹窗顶部新增「OpenWrt 首页」按钮（直达 LuCI 原生首页）；修复部分固件下发多个 sysauth cookie 时页面掉登录态、导致快捷操作退回默认入口；1.2.1：修复面板快捷操作与应用入口在部分固件上不显示（容错解析 LuCI 菜单并加默认入口）；1.2.0：面板数据改为与 iStore 客户端一致的口径（负载、速率、存储、在线设备），新增 CPU 占用、无线客户端、磁盘列表、连接数；1.1.0：点卡片先在弹窗里显示管理面板，需要时再进 LuCI

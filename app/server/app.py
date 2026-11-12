@@ -696,6 +696,17 @@ PROXY_SHIM = r"""
     window.WebSocket.CLOSING = W.CLOSING;
     window.WebSocket.CLOSED = W.CLOSED;
   }
+  // 路由器页面里的 <a href="/cgi-bin/luci/..."> 如果没被改写（主题 JS 拼的、或后插入的），
+  // 点击前补上前缀，避免 iframe 被带到本应用的根路径上
+  document.addEventListener("click", function (ev) {
+    var node = ev.target;
+    while (node && node.tagName !== "A") node = node.parentNode;
+    if (!node || !node.getAttribute) return;
+    var href = node.getAttribute("href") || "";
+    if (href.charAt(0) === "/" && href.charAt(1) !== "/" && href.indexOf(P) !== 0) {
+      node.setAttribute("href", P + href);
+    }
+  }, true);
 })();</script>
 """
 
@@ -1145,12 +1156,27 @@ HREF_ATTR_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""",
 # 老式 LuCI 的菜单链接带 /;stok=xxx/，归一化时要剥掉
 STOK_RE = re.compile(r"/;stok=[0-9a-zA-Z]+")
 TAG_RE = re.compile(r"<[^>]+>")
+# 主题用 JS 拼菜单时页面上没有 <a>，退一步全文扫路径
+PATH_SCAN_RE = re.compile(r"(/cgi-bin/luci/admin/[A-Za-z0-9_\-./]*)")
+HOME_HINT_RE = re.compile(r"/cgi-bin/luci/admin/(?:quickstart|istoreos)\b")
+SEGMENT_LABELS = {
+    "overview": "状态总览", "network": "网络", "wireless": "无线", "firewall": "防火墙",
+    "dhcp": "DHCP/DNS", "dns": "DNS", "hosts": "静态地址", "routes": "路由表",
+    "system": "系统", "admin": "管理权", "flash": "备份/升级", "backup": "备份",
+    "logs": "系统日志", "processes": "进程", "realtime": "实时信息", "wireguard": "WireGuard",
+    "nlbwmon": "流量排行", "conntrack": "连接追踪", "nf_conntrack": "连接追踪",
+    "quickstart": "首页", "home": "首页", "docker": "Docker", "store": "iStore 商店",
+    "nas": "NAS", "terminal": "终端", "ttyd": "终端", "ssh": "SSH", "vpn": "VPN",
+    "opkg": "软件包", "mounts": "挂载点", "startup": "启动项", "crontab": "计划任务",
+    "upgrade": "备份/升级",
+}
 SKIP_MENU = ("/cgi-bin/luci/admin/logout", "/cgi-bin/luci/admin/reboot", "/cgi-bin/luci/admin/translations")
 
 MENU_CACHE_TTL = 10 * 60
 CONNTRACK_TTL = 15
 MENU_CACHE = {}
 MENU_DEBUG = {}
+HOME_HINT = {}
 HOME_DEBUG = {}
 CONNTRACK_CACHE = {}
 
@@ -1217,6 +1243,26 @@ def normalize_menu_href(href):
     return value
 
 
+def scan_paths(html):
+    """全文扫描页面里出现的 /cgi-bin/luci/admin/... 路径（不依赖 <a> 结构）。"""
+    items = []
+    seen = set()
+    for path in PATH_SCAN_RE.findall(html or ""):
+        path = STOK_RE.sub("", path.split("?")[0].split("#")[0]).rstrip(".,;:)'")
+        if not path.startswith("/cgi-bin/luci/admin/") or path in seen:
+            continue
+        if any(path.startswith(skip) for skip in SKIP_MENU) or path.count("/") < 4:
+            continue
+        seen.add(path)
+        segment = path.rstrip("/").rsplit("/", 1)[-1]
+        icon, color = icon_for(path)
+        items.append({"id": segment or "root", "label": SEGMENT_LABELS.get(segment, segment),
+                      "path": path, "icon": icon, "color": color})
+        if len(items) >= 24:
+            break
+    return items
+
+
 def parse_menu(html):
     """从 LuCI 页面侧边栏里抽出真实菜单项（名称 + 路径）。
 
@@ -1240,6 +1286,12 @@ def parse_menu(html):
         icon, color = icon_for(path)
         items.append({"id": path.rstrip("/").rsplit("/", 1)[-1] or "root", "label": label,
                       "path": path, "icon": icon, "color": color})
+    if len(items) >= 4:
+        return items
+    for item in scan_paths(html):
+        if item["path"] not in seen:
+            seen.add(item["path"])
+            items.append(item)
     return items
 
 
@@ -1263,6 +1315,8 @@ def menu_of(client, dev_id):
                        "cookies": len(client.cookies)})
         if len(items) > len(best):
             best = items
+        if HOME_HINT_RE.search(text):
+            HOME_HINT[dev_id] = True
         if len(best) >= 6:
             break
     MENU_CACHE[dev_id] = (now, best)
@@ -1285,7 +1339,8 @@ HOME_CANDIDATES = (
 
 
 def home_of(client, items):
-    """返回 (路径, 名称)：菜单里的「首页」→ 常见首页路径 → `/`。"""
+    """返回 (路径, 名称)：菜单里的「首页」→ 全文线索 + 常见首页路径 → `/`。"""
+    client._home_hint = HOME_HINT.get("%s:%d" % (client.ip, client.port), False)
     for item in items or []:
         label = str(item.get("label") or "").strip()
         path = str(item.get("path") or "")
@@ -1301,6 +1356,10 @@ def home_of(client, items):
             continue
         probes.append({"path": path, "status": status, "bytes": len(data)})
         if status == 200:
+            HOME_DEBUG[client.base] = probes
+            return path, "首页"
+        if getattr(client, "_home_hint", False):
+            # 页面全文里提到了 quickstart（说明这台就是 iStoreOS 式首页），直接用它
             HOME_DEBUG[client.base] = probes
             return path, "首页"
     HOME_DEBUG[client.base] = probes
@@ -2028,7 +2087,15 @@ class Handler(BaseHTTPRequestHandler):
         referer = self.headers.get("Referer") or ""
         match = re.search(r"/proxy/(https?)/([^/?#]+)/", referer)
         if not match:
-            return ""
+            # 浏览器没发 Referer（Referrer-Policy 可能被上游设成 no-referrer）时用中转时种下的 cookie
+            cookie = self.headers.get("Cookie") or ""
+            found = re.search(r"fn_proxy_target=(https?):([^:;\s]+):(\d+)", cookie)
+            if not found:
+                return ""
+            match = re.match(r"(https?)//([^/]+)/",
+                             "%s//%s:%s/" % (found.group(1), found.group(2), found.group(3)))
+            if not match:
+                return ""
         scheme, hostport = match.group(1), match.group(2)
         host, _, port_text = hostport.partition(":")
         try:
@@ -2039,6 +2106,8 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         # 应用被挂在子路径下时，Referer 里前缀前还有 base，这里原样带回去
         prefix = proxy_base(scheme, host, port)
+        # 形如 http:192.168.200.1:80，供“漏掉前缀”的请求接回（不依赖 Referer）
+        self._proxy_target_hint = "%s:%s:%d" % (scheme, host, port)
         base = referer.split(prefix)[0]
         if base.endswith("/"):
             base = base[:-1]
@@ -2058,6 +2127,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         if content_type:
             self.send_header("Content-Type", content_type)
+        hint = getattr(self, "_proxy_target_hint", "")
+        if hint:
+            self.send_header("Set-Cookie", "fn_proxy_target=%s; Path=/; SameSite=Lax" % hint)
         for key, value in rheaders:
             lower = key.lower()
             if lower in HOP_HEADERS:
@@ -2102,6 +2174,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._proxy_fail(403, "出于安全考虑，只允许中转到局域网私有地址")
 
         prefix = proxy_base(scheme, host, port)
+        # 形如 http:192.168.200.1:80，供“漏掉前缀”的请求接回（不依赖 Referer）
+        self._proxy_target_hint = "%s:%s:%d" % (scheme, host, port)
         # 若应用被网关挂在子路径下（如 /app/xxx/），改写出的绝对路径也要带上前缀
         base = ""
         referer = self.headers.get("Referer") or ""

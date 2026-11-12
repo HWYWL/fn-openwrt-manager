@@ -379,6 +379,34 @@ class PanelTestCase(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_06b2_unprefixed_path_recovered_by_cookie(self):
+        """没有 Referer（Referrer-Policy 被上游设成 no-referrer）时，靠中转时种下的 cookie 接回。"""
+        self.login()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request("GET", "/cgi-bin/luci/",
+                         headers={"Cookie": "fn_proxy_target=http:127.0.0.1:%d" % self.router_port})
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "ignore")
+            self.assertEqual(resp.status, 200)
+            self.assertIn("L.env", body)          # 路由器的页面
+            self.assertNotIn("局域网路由管理", body)
+        finally:
+            conn.close()
+
+    def test_06b3_proxy_sets_target_cookie(self):
+        """中转响应要种 fn_proxy_target，供漏前缀的请求接回。"""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request("GET", "/proxy/http/127.0.0.1:%d/cgi-bin/luci/" % self.router_port)
+            resp = conn.getresponse()
+            resp.read()
+            cookies = resp.headers.get_all("Set-Cookie") or []
+        finally:
+            conn.close()
+        joined = " ".join(cookies)
+        self.assertIn("fn_proxy_target=http:127.0.0.1:%d" % self.router_port, joined)
+
     def test_06c_unprefixed_path_without_referer_stays_local(self):
         """没有 Referer / 非私有地址时不做接回（避免变成任意代理跳板）。"""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)

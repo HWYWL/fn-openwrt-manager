@@ -105,8 +105,11 @@ fnpack build fn-openwrt-manager
 - 流式响应使用 `Transfer-Encoding: chunked`（HTTP/1.1），避免前置网关/反代把响应整段缓冲到超时。
 - 会自动识别应用被网关挂在子路径的情况（从 `Referer` 推导），改写出的绝对路径带上该前缀。
 - **漏掉前缀的路由器请求会被接回**：中转页面里若有 JS 用绝对路径做客户端跳转（`location.href = '/cgi-bin/luci/...'`），
-  浏览器会回到我们域名下的同名路径。这类请求（`/cgi-bin/luci*`、`/luci-static*`、`/ubus`）会按 `Referer` 里的
-  `/proxy/<scheme>/<host>:<port>/` 接回对应中转目标，并且只允许私有地址——修掉了“点首页跳回自己应用页面、样式还全丢”的问题。
+  浏览器会回到我们域名下的同名路径。这类请求（`/cgi-bin/luci*`、`/luci-static*`、`/ubus`）会被接回对应中转目标，
+  并且只允许私有地址。接回依据按可靠性排序：`Referer` 里的 `/proxy/<scheme>/<host>:<port>/`，
+  其次是中转响应里种下的 `fn_proxy_target` cookie（有些上游会设 `Referrer-Policy: no-referrer`，此时只有 cookie 可用）。
+  注入脚本还加了捕获阶段的点击拦截，路由器侧边栏那种没带前缀的绝对链接会在点击前补上前缀——
+  这修掉了“弹窗里点路由器「首页」，iframe 被带到本应用根路径、页面直接跑丢”的问题。
 - **每个请求都先把请求体读满**（`Content-Length` 或 `Transfer-Encoding: chunked`）。HTTP/1.1 连接会被复用，
   只要有一条路径没读完 body（包括没命中路由的 404），下一个请求的请求行就会从残留字节中间开始解析，
   变成 `400 + HTML`。LuCI 的批量 RPC 拿到非 JSON 数组的响应就会在页面上报

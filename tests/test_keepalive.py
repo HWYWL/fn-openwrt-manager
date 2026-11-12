@@ -344,10 +344,15 @@ class ProxyTestCase(unittest.TestCase):
         harness = """
 const calls = [];
 class XHR { open(m, u) { calls.push(u); } send() {} }
+let clickHandler = null;
+const document = {
+  addEventListener: (type, fn) => { if (type === 'click') clickHandler = fn; },
+};
 const sandbox = {
   location: { protocol: 'http:', host: 'nas:8199' },
   XMLHttpRequest: XHR,
   fetch: (u) => { calls.push(u); return Promise.resolve(); },
+  document,
 };
 sandbox.window = sandbox;
 new Function(...Object.keys(sandbox), process.env.SHIM_SRC)(...Object.values(sandbox));
@@ -360,20 +365,33 @@ const urls = [
 const out = [];
 for (const u of urls) { new sandbox.XMLHttpRequest().open('POST', u); }
 sandbox.fetch('http://nas:8199/ubus/?2');
-console.log(JSON.stringify(calls));
-""" % prefix
+// 点击拦截：没带前缀的绝对链接补前缀，已带前缀/异源不动
+const anchors = ['/cgi-bin/luci/admin/quickstart', 'http://nas:8199%s/cgi-bin/luci/admin/nas/'];
+const clicked = [];
+for (const href of anchors) {
+  const a = { tagName: 'A', attrs: { href }, getAttribute(k) { return this.attrs[k]; }, setAttribute(k, v) { this.attrs[k] = v; } };
+  clickHandler({ target: a });
+  clicked.push(a.getAttribute('href'));
+}
+console.log(JSON.stringify({ calls, clicked }));
+""" % (prefix, prefix)
         env = dict(os.environ, SHIM_SRC=shim)
         result = subprocess.run(
             ["node", "-e", harness], capture_output=True, text=True, env=env, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         got = json.loads(result.stdout)
-        self.assertEqual(got, [
+        self.assertEqual(got["calls"], [
             prefix + "/ubus/?1",                          # 相对绝对路径
             "http://nas:8199" + prefix + "/ubus/?1",       # 同源绝对地址（本次 bug）
             "http://nas:8199" + prefix + "/ubus/?1",       # 已带前缀，保持不动
             "http://192.168.200.1/ubus/?1",               # 异源，保持不动
             "http://nas:8199" + prefix + "/ubus/?2",       # fetch 走同一套改写
+        ])
+        # 点击拦截：路由器侧边栏那种绝对链接补上前缀，已带前缀的不重复加
+        self.assertEqual(got["clicked"], [
+            prefix + "/cgi-bin/luci/admin/quickstart",
+            "http://nas:8199" + prefix + "/cgi-bin/luci/admin/nas/",
         ])
 
 
