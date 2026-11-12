@@ -21,6 +21,10 @@
     viewerProxy: '',
     viewerLoaded: false,
     viewerDirect: false,
+    viewIndex: 'panel',
+    panelTarget: null,
+    panelTimer: null,
+    panelSeq: 0,
     frameTimer: null,
     frameHintTimer: null,
     debugTimer: null,
@@ -162,6 +166,267 @@
     });
   }
 
+  /* ------------------------------------------------ 面板（弹窗第一屏） */
+
+  var PANEL_ICONS = {
+    grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/>',
+    swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+    wifi: '<path d="M3 9a14 14 0 0 1 18 0M6 12.5a9.5 9.5 0 0 1 12 0M9.2 16a5 5 0 0 1 5.6 0"/><circle cx="12" cy="19.2" r="1"/>',
+    shield: '<path d="M12 3.5l7 2.6v5.2c0 4.4-2.9 7.4-7 9.2-4.1-1.8-7-4.8-7-9.2V6.1z"/>',
+    list: '<path d="M8 6.5h12M8 12h12M8 17.5h12"/><circle cx="4.3" cy="6.5" r="1"/><circle cx="4.3" cy="12" r="1"/><circle cx="4.3" cy="17.5" r="1"/>',
+    cpu: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3.5v3M14 3.5v3M10 17.5v3M14 17.5v3M3.5 10h3M3.5 14h3M17.5 10h3M17.5 14h3"/>',
+    log: '<path d="M14.5 3.5H7a1.5 1.5 0 0 0-1.5 1.5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V7.5z"/><path d="M14.5 3.5v4h4M9.5 12.5h5M9.5 16h5"/>',
+    term: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 10l2.5 2L7 14M12.5 14.5H17"/>',
+    chart: '<path d="M4 20V9M9.3 20V4M14.6 20v-7M20 20v-11"/>',
+    link: '<path d="M9.5 14.5l5-5"/><path d="M10.8 7.2l1.6-1.6a3.6 3.6 0 0 1 5 5l-1.6 1.6M13.2 16.8l-1.6 1.6a3.6 3.6 0 0 1-5-5l1.6-1.6"/>',
+    wave: '<path d="M3 15l4.5-6 4 4.5L16 7l5 6"/>',
+    tool: '<circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.6M12 17.9v2.6M3.5 12h2.6M17.9 12h2.6M6 6l1.8 1.8M16.2 16.2L18 18M18 6l-1.8 1.8M7.8 16.2L6 18"/>',
+    bag: '<path d="M5.5 8h13l-1 12h-11z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/>',
+    box: '<path d="M12 3.5l8 4v9l-8 4-8-4v-9z"/><path d="M4 7.5l8 4 8-4M12 11.5v9"/>',
+    folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.5h8A1.5 1.5 0 0 1 20.5 10v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z"/>'
+  };
+
+  function panelIcon(name) {
+    var path = PANEL_ICONS[name] || PANEL_ICONS.grid;
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+      'stroke-linecap="round" stroke-linejoin="round">' + path + '</svg>';
+  }
+
+  function fmtBytes(value) {
+    var n = Number(value) || 0;
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+    return (i === 0 ? String(Math.round(n)) : n.toFixed(n >= 100 ? 0 : 1)) + ' ' + units[i];
+  }
+
+  function fmtRate(value) {
+    if (value == null) return '--';
+    return fmtBytes(value) + '/s';
+  }
+
+  function fmtUptime(seconds) {
+    var s = Math.max(0, Math.floor(Number(seconds) || 0));
+    var d = Math.floor(s / 86400);
+    var h = Math.floor((s % 86400) / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    if (d > 0) return d + '天 ' + h + ':' + (m < 10 ? '0' + m : m);
+    if (h > 0) return h + ':' + (m < 10 ? '0' + m : m);
+    return m + ' 分钟';
+  }
+
+  function sparkline(history) {
+    var points = (history || []).slice(-60);
+    if (points.length < 2) return '';
+    var max = 1;
+    points.forEach(function (p) { max = Math.max(max, p[1], p[2]); });
+    function pathOf(index) {
+      return points.map(function (p, i) {
+        var x = (i / (points.length - 1)) * 320;
+        var y = 60 - Math.min(58, (p[index] / max) * 56);
+        return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+      }).join(' ');
+    }
+    return '<svg class="spark" viewBox="0 0 320 60" preserveAspectRatio="none">' +
+      '<path d="' + pathOf(1) + '" fill="none" stroke="var(--accent)" stroke-width="2"/>' +
+      '<path d="' + pathOf(2) + '" fill="none" stroke="var(--purple, #7c3aed)" stroke-width="1.6" stroke-dasharray="4 3"/>' +
+      '</svg>';
+  }
+
+  function panelLoginForm(dev) {
+    return '<form class="panel-login" id="panel-login-form" data-dev="' + esc(dev) + '">' +
+      '<div class="panel-login-text"><b>填入路由器账号密码</b>' +
+      '<span>只保存在这台 NAS 上（文件权限 600），用来读取面板数据，并让中转后的 LuCI 免登录。</span></div>' +
+      '<label><span>用户名</span><input name="username" value="root" autocomplete="username" spellcheck="false"></label>' +
+      '<label><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>' +
+      '<button class="btn primary tiny" type="submit">保存并连接</button>' +
+      '<button class="btn tiny" type="button" id="panel-login-clear">清除已存密码</button>' +
+      '</form>';
+  }
+
+  function renderPanel(data) {
+    var box = $('#viewer-panel');
+    if (!data) return;
+    var hasForm = !!box.querySelector('#panel-login-form');
+    if (!data.authed && hasForm) return;   // 正在输密码，不要被轮询刷掉
+    var scrollTop = box.scrollTop;
+
+    var dev = (state.panelTarget && state.panelTarget.dev) || '';
+    var html = '';
+
+    if (!data.authed) {
+      html += '<div class="panel-note"><b>未连接</b><span>' +
+        esc(data.error || '还没有保存这台路由器的账号密码') + '</span></div>' + panelLoginForm(dev);
+      html += panelTilesHtml(data, true) + panelAppsHtml(data);
+      box.innerHTML = html;
+      box.scrollTop = scrollTop;
+      return;
+    }
+
+    var board = data.board || {};
+    var memory = data.memory || {};
+    var storage = data.storage || {};
+    var wan = data.wan || {};
+    var rate = data.rate || null;
+    var load = (data.system && data.system.load) || [];
+    var cpu = data.cpu || {};
+    var clients = data.clients || {};
+
+    html += '<div class="panel-sec">运行状态<span class="panel-sec-hint">每 3 秒刷新</span></div>';
+    html += '<div class="panel-stats">';
+    html += '<div class="panel-card hero"><h4>实时速率</h4>' +
+      '<div class="panel-rate"><div><b>' + fmtRate(rate && rate.down) + '</b><small>↓</small></div>' +
+      '<div><b>' + fmtRate(rate && rate.up) + '</b><small>↑</small></div></div>' +
+      sparkline(data.history) +
+      '<div class="panel-hint">' + (wan.iface ? esc(wan.iface) + ' · ' : '') +
+      (wan.ip ? esc(wan.ip) + ' · ' : '') + (wan.up ? '链路正常' : '链路断开') + '</div></div>';
+    html += '<div class="panel-card"><h4>运行时长</h4><div class="panel-big">' +
+      fmtUptime(data.system && data.system.uptime) + '</div>' +
+      '<div class="panel-kv"><span>负载 1/5/15</span><b>' + (load.length ? load.join(' / ') : '--') + '</b></div>' +
+      '<div class="panel-kv"><span>固件</span><b>' + esc(board.firmware || board.model || '--') + '</b></div></div>';
+    html += '<div class="panel-card"><h4>在线设备</h4><div class="panel-big">' + (clients.dhcp || 0) +
+      '<span> 台</span></div>' +
+      '<div class="panel-kv"><span>DHCP 租约</span><b>' + (clients.dhcp || 0) + '</b></div>' +
+      '<div class="panel-kv"><span>WAN 状态</span><b>' + (wan.up ? '已连接' : '未连接') + '</b></div></div>';
+    html += '</div>';
+
+    html += '<div class="panel-sec">系统资源</div><div class="panel-res">';
+    html += '<div class="panel-card"><h4>处理器</h4><div class="panel-big">' +
+      (load.length ? Number(load[0]).toFixed(2) : '--') + '<span> 负载 1m</span></div>' +
+      '<div class="panel-bar g"><i style="width:' + Math.min(100, Math.max(2, (Number(load[0]) || 0) * 100)) + '%"></i></div>' +
+      '<div class="panel-kv"><span>温度 / 频率</span><b>' + (cpu.temp != null ? cpu.temp + '℃' : '--') +
+      ' / ' + (cpu.freq ? cpu.freq + 'MHz' : '--') + '</b></div>' +
+      '<div class="panel-kv"><span>型号</span><b>' + esc(board.cpu || board.model || '--') + '</b></div></div>';
+    html += '<div class="panel-card"><h4>内存</h4><div class="panel-big">' + (memory.pct || 0) + '%</div>' +
+      '<div class="panel-bar b"><i style="width:' + Math.min(100, memory.pct || 0) + '%"></i></div>' +
+      '<div class="panel-kv"><span>已用 / 总量</span><b>' + fmtBytes(memory.used) + ' / ' + fmtBytes(memory.total) + '</b></div>' +
+      '<div class="panel-kv"><span>可用</span><b>' + fmtBytes(memory.available) + '</b></div></div>';
+    html += '<div class="panel-card"><h4>存储</h4><div class="panel-big">' + (storage.pct || 0) + '%</div>' +
+      '<div class="panel-bar p"><i style="width:' + Math.min(100, storage.pct || 0) + '%"></i></div>' +
+      '<div class="panel-kv"><span>根分区</span><b>' + fmtBytes(storage.used) + ' / ' + fmtBytes(storage.total) + '</b></div>' +
+      '<div class="panel-kv"><span>剩余</span><b>' + fmtBytes(storage.free) + '</b></div></div>';
+    html += '</div>';
+
+    html += panelTilesHtml(data, true) + panelAppsHtml(data);
+    box.innerHTML = html;
+    box.scrollTop = scrollTop;
+  }
+
+  function panelTilesHtml(data, enabled) {
+    var tiles = data.tiles || [];
+    if (!tiles.length) return '';
+    var body = tiles.map(function (t) {
+      var off = t.available === false;
+      return '<button type="button" class="panel-tile js-tile' + (off ? ' off' : '') + '"' +
+        ' data-path="' + esc(t.path) + '" data-label="' + esc(t.label) + '"' +
+        (off || !enabled ? ' disabled' : '') + ' title="' + esc(off ? t.label + '（路由器上未安装）' : t.label) + '">' +
+        '<i class="pic ' + esc(t.color || 'n') + '">' + panelIcon(t.icon) + '</i><span>' + esc(t.label) + '</span></button>';
+    }).join('');
+    return '<div class="panel-sec">快捷操作</div><div class="panel-tiles">' + body + '</div>';
+  }
+
+  function panelAppsHtml(data) {
+    var apps = data.apps || [];
+    if (!apps.length) return '';
+    var body = apps.map(function (a) {
+      var off = a.available === false;
+      return '<button type="button" class="panel-app js-tile' + (off ? ' off' : '') + '"' +
+        ' data-path="' + esc(a.path) + '" data-label="' + esc(a.label) + '"' +
+        (off ? ' disabled' : '') + '>' +
+        '<i class="pic ' + esc(a.color || 'n') + '">' + panelIcon(a.icon) + '</i>' +
+        '<span><strong>' + esc(a.label) + '</strong><em>' + esc(a.desc || '') + '</em></span></button>';
+    }).join('');
+    return '<div class="panel-sec">应用与文件</div><div class="panel-apps">' + body + '</div>';
+  }
+
+  function stopPanelPolling() {
+    if (state.panelTimer) {
+      clearInterval(state.panelTimer);
+      state.panelTimer = null;
+    }
+  }
+
+  function loadPanel() {
+    var target = state.panelTarget;
+    if (!target || !target.dev) return;
+    var seq = state.panelSeq + 1;
+    state.panelSeq = seq;
+    api('router/dashboard?id=' + encodeURIComponent(target.dev)).then(function (data) {
+      if (seq !== state.panelSeq) return;
+      renderPanel(data);
+    }).catch(function (err) {
+      if (seq !== state.panelSeq) return;
+      $('#viewer-panel').innerHTML = '<div class="panel-note err"><b>读取失败</b><span>' + esc(err.message) + '</span></div>';
+    });
+  }
+
+  function startPanelPolling() {
+    stopPanelPolling();
+    loadPanel();
+    state.panelTimer = setInterval(loadPanel, 3000);
+  }
+
+  function showPanelView() {
+    state.viewIndex = 'panel';
+    $('#viewer-panel').hidden = false;
+    $('#viewer-frame-wrap').hidden = true;
+    $('#viewer-back').hidden = true;
+    $('#viewer-home').hidden = false;
+    $('#viewer-loading').hidden = true;
+    $('#viewer-hint').hidden = true;
+    var tag = $('#viewer-mode');
+    tag.textContent = '面板';
+    tag.classList.remove('direct');
+    tag.classList.add('panel');
+    startPanelPolling();
+  }
+
+  function showFrameView(url, isDirect) {
+    state.viewIndex = 'frame';
+    stopPanelPolling();
+    $('#viewer-panel').hidden = true;
+    $('#viewer-frame-wrap').hidden = false;
+    $('#viewer-back').hidden = false;
+    $('#viewer-home').hidden = true;
+    loadFrame(url, isDirect);
+  }
+
+  // 面板/首页里点某个 LuCI 路径：按当前访问方式决定走直连还是中转
+  function openFrameFor(path) {
+    var target = state.panelTarget;
+    if (!target) return;
+    var directUrl = target.directBase + path;
+    var proxyUrl = target.proxyBase + path;
+    var seq = state.viewerSeq;
+
+    function useProxy() {
+      setChannel('中转');
+      showFrameView(proxyUrl, false);
+    }
+
+    if (state.mode === 'direct') {
+      setChannel('直连', true);
+      showFrameView(directUrl, true);
+      return;
+    }
+    if (state.mode === 'proxy') { useProxy(); return; }
+
+    setChannel('自动');
+    var host = hostOf(directUrl);
+    if (!pageIsLocal() || directRecentlyFailed(host)) { useProxy(); return; }
+    probeDirect(directUrl).then(function (ok) {
+      if (seq !== state.viewerSeq) return;
+      if (ok) {
+        setChannel('直连', true);
+        showFrameView(directUrl, true);
+        return;
+      }
+      if (host) state.directFail[host] = Date.now();
+      setChannel('中转');
+      showFrameView(proxyUrl, false);
+    });
+  }
+
   /* ------------------------------------------------ 应用内弹窗查看 */
 
   function viewerFrame() {
@@ -171,6 +436,7 @@
   function setChannel(text, isDirect) {
     var tag = $('#viewer-mode');
     tag.textContent = text;
+    tag.classList.remove('panel');
     tag.classList.toggle('direct', !!isDirect);
   }
 
@@ -221,48 +487,22 @@
   function openViewer(opts) {
     var dialog = $('#viewer');
     state.viewerSeq += 1;
-    var seq = state.viewerSeq;
+    state.panelTarget = {
+      dev: opts.dev || '',
+      directBase: String(opts.direct || '').replace(/\/+$/, ''),
+      proxyBase: String(opts.proxy || '').replace(/\/+$/, '')
+    };
+    state.panelSeq = 0;
     state.viewerProxy = opts.proxy;
     $('#viewer-title').textContent = opts.title || '路由器';
     $('#viewer-addr').textContent = opts.addr || '';
-    $('#viewer-loading').hidden = false;
+    $('#viewer-panel').innerHTML = '<div class="panel-loading">正在读取路由器状态…</div>';
     if (!dialog.open) dialog.showModal();
-
-    if (state.mode === 'direct') {
-      setChannel('直连', true);
-      loadFrame(opts.direct, true);
-      return;
-    }
-    if (state.mode === 'proxy') {
-      setChannel('中转');
-      loadFrame(opts.proxy, false);
-      return;
-    }
-
-    // 自动：页面本身就在公网域名下（远程访问），浏览器肯定到不了内网，直接中转
-    var target = hostOf(opts.direct);
-    if (!pageIsLocal() || directRecentlyFailed(target)) {
-      setChannel('中转');
-      loadFrame(opts.proxy, false);
-      return;
-    }
-
-    setChannel('自动');
-    probeDirect(opts.direct).then(function (ok) {
-      if (seq !== state.viewerSeq) return;
-      if (ok) {
-        setChannel('直连', true);
-        loadFrame(opts.direct, true);
-        return;
-      }
-      if (target) state.directFail[target] = Date.now();
-      setChannel('中转');
-      loadFrame(opts.proxy, false);
-      toast('当前网络无法直连该设备，已通过 NAS 中转打开', '');
-    });
+    showPanelView();
   }
 
   function closeViewer() {
+    stopPanelPolling();
     var dialog = $('#viewer');
     if (dialog.open) dialog.close();
   }
@@ -295,10 +535,11 @@
     var direct = device.url;
     var proxied = proxyUrl(device);
 
-    var meta = ' data-title="' + esc(title) + '" data-addr="' + esc(address) + '"';
+    var meta = ' data-title="' + esc(title) + '" data-addr="' + esc(address) + '"' +
+      ' data-dev="' + esc((device.ip || '') + ':' + (device.port || 80)) + '"';
     var actions = '<button type="button" class="btn primary tiny js-open" data-direct="' + esc(direct) +
-      '" data-proxy="' + esc(proxied) + '"' + meta + ' title="在弹窗中打开（Shift + 点击在新标签页打开）">' +
-      ICONS.open + '打开' + (kind === 'openwrt' ? ' LuCI' : '页面') + '</button>';
+      '" data-proxy="' + esc(proxied) + '"' + meta + ' title="先看面板，需要时再进 LuCI（Shift + 点击直接在新标签页打开）">' +
+      ICONS.open + '打开面板' + (kind === 'openwrt' ? ' / LuCI' : '') + '</button>';
 
     if (mode === 'scan') {
       actions += '<button class="btn tiny icon js-fav" data-url="' + esc(device.url) + '" data-title="' + esc(device.title || device.ip) +
@@ -647,21 +888,71 @@
 
     var viewer = $('#viewer');
     $('#viewer-close').addEventListener('click', closeViewer);
-    $('#viewer-reload').addEventListener('click', reloadFrame);
+    $('#viewer-reload').addEventListener('click', function () {
+      if (state.viewIndex === 'panel') { loadPanel(); return; }
+      reloadFrame();
+    });
     $('#viewer-log').addEventListener('click', openDebug);
+    $('#viewer-back').addEventListener('click', function () {
+      $('#viewer-panel').innerHTML = '';
+      showPanelView();
+    });
+    $('#viewer-home').addEventListener('click', function () { openFrameFor('/'); });
+    // 面板里的 tile / 应用入口 / 登录表单
+    $('#viewer-panel').addEventListener('click', function (event) {
+      var tile = event.target.closest('.js-tile');
+      if (tile && !tile.disabled) {
+        openFrameFor(tile.dataset.path || '/');
+        return;
+      }
+      if (event.target.closest('#panel-login-clear')) {
+        var dev = (state.panelTarget && state.panelTarget.dev) || '';
+        api('router/login?id=' + encodeURIComponent(dev), { method: 'DELETE' }).then(function () {
+          toast('已清除路由器密码', 'ok');
+          $('#viewer-panel').innerHTML = '';
+          startPanelPolling();
+        }).catch(function (err) { toast(err.message, 'err'); });
+      }
+    });
+    $('#viewer-panel').addEventListener('submit', function (event) {
+      if (event.target.id !== 'panel-login-form') return;
+      event.preventDefault();
+      var dev = (state.panelTarget && state.panelTarget.dev) || '';
+      var form = event.target;
+      var username = (form.querySelector('[name=username]').value || '').trim() || 'root';
+      var password = form.querySelector('[name=password]').value || '';
+      var btn = form.querySelector('button[type=submit]');
+      if (!password) { toast('请输入路由器密码', 'err'); return; }
+      btn.disabled = true;
+      btn.textContent = '连接中…';
+      postJSON('router/login', { id: dev, username: username, password: password })
+        .then(function () {
+          toast('已连接路由器，面板数据开始加载', 'ok');
+          $('#viewer-panel').innerHTML = '<div class="panel-loading">正在读取路由器状态…</div>';
+          startPanelPolling();
+        })
+        .catch(function (err) {
+          toast(err.message, 'err');
+          btn.disabled = false;
+          btn.textContent = '保存并连接';
+        });
+    });
     $('#viewer-switch').addEventListener('click', function () {
       if (!state.viewerProxy) return;
       setChannel('中转');
-      loadFrame(state.viewerProxy, false);
+      showFrameView(state.viewerProxy, false);
     });
     $('#viewer-tab').addEventListener('click', function () {
       if (state.viewerUrl) window.open(state.viewerUrl, '_blank', 'noopener');
     });
     viewer.addEventListener('close', function () {
+      stopPanelPolling();
       viewerFrame().src = 'about:blank';
       clearTimeout(state.frameTimer);
       clearTimeout(state.frameHintTimer);
       state.viewerUrl = '';
+      state.panelTarget = null;
+      $('#viewer-panel').innerHTML = '';
       $('#viewer-hint').hidden = true;
     });
     viewer.addEventListener('click', function (event) {
@@ -670,6 +961,7 @@
 
     function openFrom(el, event) {
       var opts = {
+        dev: el.dataset.dev,
         direct: el.dataset.direct,
         proxy: el.dataset.proxy,
         title: el.dataset.title,

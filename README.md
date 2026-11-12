@@ -11,8 +11,15 @@
   内网里的其他 Web 服务不再混在列表里；每张卡片可点删除（忽略），下次扫描不再出现，
   需要时点「恢复已忽略」还原（忽略列表存 `TRIM_PKGVAR/data/ignored.json`）。
 - **手动添加**：支持 `192.168.1.1`、`192.168.1.1:8080`、`http://router.lan` 等写法，添加时即时探测。
-- **一键打开**：点击卡片 / 按钮在应用内的弹窗（iframe）中打开 LuCI 管理页面，弹窗顶部可刷新、
-  在新标签页打开或关闭；按住 `Shift`（或 `Ctrl`/`⌘`）点击则直接在新标签页打开。
+- **一键打开 → 面板**：点击卡片 / 按钮先在弹窗里打开「面板」——实时速率、运行时长、在线设备数、CPU/内存/存储、
+  12 个快捷操作（状态总览、网络、WiFi、防火墙、DHCP/DNS、系统、日志、终端、流量排行、连接跟踪、接口状态、系统维护）
+  以及 iStore / Docker / 文件入口；点任意一项就在**同一个弹窗里**切到对应 LuCI 页，顶部「← 面板」返回，
+  「LuCI 首页」直接进路由器首页；按住 `Shift`（或 `Ctrl`/`⌘`）点击卡片仍然直接在新标签页开 LuCI。
+- **面板数据怎么取**：在面板里填一次路由器账号密码（存 `TRIM_PKGVAR/data/routers.json`，权限 `600`），
+  NAS 服务端表单登录 LuCI 拿会话，再用 ubus JSON-RPC 取 `system board/info`、`network.interface dump`、
+  `dhcp ipv4leases`；速率是两次采样字节差算出来的。顺带让**中转自动带上登录态**，弹窗里进 LuCI 不用再输密码。
+  取不到的项显示 `--`（比如 CPU 温度/频率需要 `file read` ACL）；CPU 占用用 1 分钟负载代替（没 `/proc/stat` 权限）。
+  tile 可用性由服务端探测（10 分钟缓存），路由器上没装的直接置灰。
 - **弹窗内固定浅色**：弹窗的 iframe 上声明了 `color-scheme: only light`。iStoreOS 的 Argon 主题在
   `argon.global.mode=normal`（跟随系统）时把深色样式包在 `@media (prefers-color-scheme: dark)` 里，
   而现代浏览器会把**宿主页面（飞牛桌面窗口）的配色**传给内嵌文档，于是深色窗口里路由器页面会跟着变深色、
@@ -37,10 +44,10 @@
 ```
 manifest              应用信息（service_port = 8199）
 cmd/main              启停脚本：探测 python3 → 启动 app/server/app.py
-app/server/app.py     后端（纯 Python 标准库：HTTP 服务 + 网段识别 + 扫描）
+app/server/app.py     后端（纯 Python 标准库：HTTP 服务 + 网段识别 + 扫描 + 中转 + 面板数据）
 app/www/              前端页面（原生 HTML/CSS/JS，无构建步骤）
 app/ui/config         桌面入口（type = iframe，在飞牛桌面窗口内打开 http://<NAS>:8199/）
-tests/                回归测试（标准库 unittest：中转发帧 + 路径改写）
+tests/                回归测试（标准库 unittest：中转发帧、路径改写、面板登录与取数）
 config/               权限与资源配置
 ```
 

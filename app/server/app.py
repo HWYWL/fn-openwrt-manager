@@ -815,6 +815,501 @@ PROXY_ERROR_PAGE = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf
 </body></html>"""
 
 
+# ---------------------------------------------------------------- 路由器登录 & 面板数据
+# 弹窗第一屏的“面板”数据由 NAS 服务端直接向路由器取：
+#   1. 表单登录 /cgi-bin/luci/ 拿 sysauth cookie（账号密码存 TRIM_PKGVAR/data/routers.json，0600）
+#   2. 从登录后的 LuCI 页面里读出 ubus 会话 id
+#   3. 用 JSON-RPC 调 /ubus（不可用时回退 /cgi-bin/luci/admin/ubus），取系统/网络/内存数据
+
+ROUTERS_FILE = os.path.join(DATA_DIR, "routers.json")
+ROUTERS_LOCK = threading.Lock()
+
+# 面板里的快捷操作：id, 名称, LuCI 路径, 配色, 图标
+PANEL_TILES = [
+    ("overview", "状态总览", "/cgi-bin/luci/admin/status/overview", "g", "grid"),
+    ("network", "网络管理", "/cgi-bin/luci/admin/network/network", "b", "swap"),
+    ("wireless", "WiFi 管理", "/cgi-bin/luci/admin/network/wireless", "b", "wifi"),
+    ("firewall", "防火墙", "/cgi-bin/luci/admin/network/firewall", "w", "shield"),
+    ("dhcp", "DHCP/DNS", "/cgi-bin/luci/admin/network/dhcp", "n", "list"),
+    ("system", "系统", "/cgi-bin/luci/admin/system/system", "n", "cpu"),
+    ("logs", "日志", "/cgi-bin/luci/admin/status/logs", "n", "log"),
+    ("terminal", "终端", "/cgi-bin/luci/admin/system/terminal", "p", "term"),
+    ("nlbwmon", "流量排行", "/cgi-bin/luci/admin/nlbwmon", "p", "chart"),
+    ("conntrack", "连接追踪", "/cgi-bin/luci/admin/status/nf_conntrack", "n", "link"),
+    ("realtime", "接口状态", "/cgi-bin/luci/admin/status/realtime/bandwidth", "b", "wave"),
+    ("maintenance", "系统维护", "/cgi-bin/luci/admin/system/flash", "n", "tool"),
+]
+
+PANEL_APPS = [
+    ("istore", "iStore 商店", "/cgi-bin/luci/admin/store/", "g", "bag", "浏览与安装路由器插件"),
+    ("docker", "Docker", "/cgi-bin/luci/admin/docker/", "b", "box", "容器与镜像管理"),
+    ("files", "文件管理", "/cgi-bin/luci/admin/nas/", "w", "folder", "浏览路由器上的文件"),
+]
+
+SESSION_TTL = 20 * 60
+TILE_PROBE_TTL = 10 * 60
+DASH_CACHE_TTL = 1.5
+SESSIONS = {}
+SESSIONS_LOCK = threading.Lock()
+DASH_CACHE = {}
+RATE_STATE = {}
+RATE_HISTORY = {}
+RATE_LOCK = threading.Lock()
+PROBE_CACHE = {}
+
+
+_CREDS_CACHE = {"ts": 0.0, "data": {}}
+
+
+def load_routers():
+    now = time.time()
+    if now - _CREDS_CACHE["ts"] < 5.0:
+        return _CREDS_CACHE["data"]
+    with ROUTERS_LOCK:
+        try:
+            with open(ROUTERS_FILE, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            data = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            data = {}
+    _CREDS_CACHE.update({"ts": now, "data": data})
+    return data
+
+
+def save_routers(routers):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = ROUTERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(routers, fp, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, ROUTERS_FILE)
+    _CREDS_CACHE.update({"ts": 0.0, "data": {}})
+
+
+def set_credentials(dev_id, username, password):
+    routers = load_routers()
+    routers[dev_id] = {
+        "username": username,
+        "password": password,
+        "updated_at": int(time.time()),
+    }
+    save_routers(routers)
+    drop_session(dev_id)
+
+
+def clear_credentials(dev_id):
+    routers = load_routers()
+    if routers.pop(dev_id, None) is not None:
+        save_routers(routers)
+    drop_session(dev_id)
+
+
+def credentials_status():
+    """哪些设备存过账号（不返回密码）。"""
+    out = {}
+    for dev_id, item in load_routers().items():
+        out[dev_id] = {"username": item.get("username", ""), "has_password": bool(item.get("password"))}
+    return out
+
+
+def drop_session(dev_id):
+    with SESSIONS_LOCK:
+        SESSIONS.pop(dev_id, None)
+    DASH_CACHE.pop(dev_id, None)
+    PROBE_CACHE.pop(dev_id, None)
+
+
+def target_of(dev_id):
+    """"192.168.1.1:80" -> (ip, port, scheme)"""
+    ip, _, port_text = (dev_id or "").partition(":")
+    port = int(port_text) if port_text.isdigit() else 80
+    scheme = "https" if port in (443, 8443) else "http"
+    return ip, port, scheme
+
+
+def _num(src, *keys, **kw):
+    default = kw.get("default")
+    cur = src
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    if isinstance(cur, bool):
+        return int(cur)
+    if isinstance(cur, (int, float)):
+        return cur
+    try:
+        return float(str(cur).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+class SessionExpired(Exception):
+    pass
+
+
+class LuCiClient(object):
+    """对一个路由器的最小 LuCI 客户端：表单登录 + ubus JSON-RPC。"""
+
+    def __init__(self, ip, port, scheme="http"):
+        self.ip = ip
+        self.port = port
+        self.scheme = scheme
+        self.base = "%s://%s:%d" % (scheme, ip, port)
+        self.cookie = ""
+        self.stok = ""
+        self.sid = ""
+        self.rpc_path = ""
+        self.stamp = 0.0
+
+    # ---------- 底层
+
+    def _http(self, method, path, body=None, headers=None, timeout=8.0):
+        if self.scheme == "https":
+            conn = http.client.HTTPSConnection(self.ip, self.port, timeout=timeout, context=SSL_CTX)
+        else:
+            conn = http.client.HTTPConnection(self.ip, self.port, timeout=timeout)
+        hdrs = {"User-Agent": UA, "Accept": "*/*"}
+        if self.cookie:
+            hdrs["Cookie"] = self.cookie
+        hdrs.update(headers or {})
+        try:
+            conn.request(method, path, body=body, headers=hdrs)
+            resp = conn.getresponse()
+            data = resp.read()
+            status = resp.status
+            rheaders = resp.getheaders()
+            if not self.cookie:
+                for key, value in rheaders:
+                    if key.lower() == "set-cookie" and value.lower().startswith("sysauth"):
+                        self.cookie = value.split(";")[0].strip()
+            return status, rheaders, data
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def login(self, username, password):
+        self.cookie = ""
+        self.stok = ""
+        self.sid = ""
+        self.rpc_path = ""
+        body = urllib.parse.urlencode({"luci_username": username, "luci_password": password}).encode()
+        status, headers, _data = self._http(
+            "POST", "/cgi-bin/luci/", body,
+            {"Content-Type": "application/x-www-form-urlencoded",
+             "Referer": self.base + "/cgi-bin/luci/"},
+        )
+        if not self.cookie:
+            log("%s 登录失败：没有拿到 sysauth cookie (HTTP %s)" % (self.base, status))
+            return False
+        for key, value in headers:
+            if key.lower() == "location":
+                m = re.search(r";stok=([0-9a-fA-F]+)", value)
+                if m:
+                    self.stok = m.group(1)
+        # 从登录后的页面里取 ubus 会话 id
+        status, _headers, data = self._http("GET", "/cgi-bin/luci/")
+        text = data.decode("utf-8", "ignore")
+        m = re.search(r'sessionid"\s*:\s*"([0-9a-fA-F]{32})"', text)
+        if not m:
+            m = re.search(r"sessionid['\"]?\s*[:=]\s*['\"]?([0-9a-fA-F]{32})", text)
+        if not m or set(m.group(1)) == {"0"}:
+            log("%s 登录失败：会话 id 无效（密码错或 LuCI 页面结构变了）" % self.base)
+            return False
+        self.sid = m.group(1)
+        self.stamp = time.time()
+        return True
+
+    def _rpc_candidates(self):
+        if self.rpc_path:
+            return [self.rpc_path]
+        if self.stok:
+            return ["/ubus", "/cgi-bin/luci/;stok=%s/admin/ubus" % self.stok]
+        return ["/ubus", "/cgi-bin/luci/admin/ubus"]
+
+    def call(self, obj, method, params=None):
+        """调一个 ubus 方法，成功返回数据 dict，失败返回 None。"""
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "call",
+                   "params": [self.sid, obj, method, params or {}]}
+        body = json.dumps(payload).encode()
+        for path in self._rpc_candidates():
+            status, _headers, data = self._http("POST", path, body, {"Content-Type": "application/json"})
+            try:
+                reply = json.loads(data.decode("utf-8", "ignore"))
+            except ValueError:
+                continue
+            if not isinstance(reply, dict):
+                continue
+            err = reply.get("error")
+            if isinstance(err, dict):
+                if err.get("code") in (-32002, -32004):
+                    raise SessionExpired()
+                log("%s ubus %s.%s 失败：%s" % (self.base, obj, method, err.get("message") or err))
+                return None
+            result = reply.get("result")
+            if isinstance(result, list) and result:
+                self.rpc_path = path
+                if result[0] == 0:
+                    return result[1] if len(result) > 1 and isinstance(result[1], dict) else {}
+                log("%s ubus %s.%s 状态码 %s" % (self.base, obj, method, result[0]))
+                return None
+        return None
+
+    def probe(self, path):
+        """这个 LuCI 路径在这台设备上存在吗（200/302 视为存在）。"""
+        try:
+            status, headers, _data = self._http("GET", path, timeout=5.0)
+        except Exception:
+            return None
+        return status in (200, 301, 302, 303, 307, 308)
+
+
+def get_client(dev_id, force=False):
+    """拿到一个已登录的客户端；没有凭据/登录失败返回 (None, 原因)。"""
+    ip, port, scheme = target_of(dev_id)
+    if not ip:
+        return None, "设备标识不正确"
+    creds = load_routers().get(dev_id)
+    if not creds or not creds.get("password"):
+        return None, "未保存账号密码"
+    with SESSIONS_LOCK:
+        client = SESSIONS.get(dev_id)
+        if client and not force and time.time() - client.stamp < SESSION_TTL:
+            return client, ""
+    client = LuCiClient(ip, port, scheme)
+    if not client.login(creds.get("username") or "root", creds.get("password") or ""):
+        return None, "登录路由器失败（账号或密码不对）"
+    with SESSIONS_LOCK:
+        SESSIONS[dev_id] = client
+    return client, ""
+
+
+def router_proxy_cookie(ip, port):
+    """中转自动登录：有这个设备的凭据就返回 sysauth cookie，否则空。"""
+    dev_id = "%s:%d" % (ip, port)
+    try:
+        client, _reason = get_client(dev_id)
+    except Exception:
+        return ""
+    return client.cookie if client else ""
+
+
+def _call_all(client, calls):
+    out = {}
+    for name, (obj, method) in calls.items():
+        try:
+            out[name] = client.call(obj, method)
+        except SessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log("ubus %s.%s 异常: %r" % (obj, method, exc))
+            out[name] = None
+    return out
+
+
+def _wan_of(dump):
+    items = (dump or {}).get("interface") or []
+    if not isinstance(items, list):
+        return None
+    best = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("interface") or "")
+        if name not in ("wan", "wwan") and not name.startswith("wan"):
+            continue
+        if name.endswith("_6") or name.endswith("_4"):
+            continue
+        if item.get("up"):
+            best = item
+            break
+        best = best or item
+    return best
+
+
+def _leases_count(leases):
+    if not isinstance(leases, dict):
+        return 0
+    table = leases.get("leases")
+    if isinstance(table, dict):
+        return len(table)
+    if isinstance(table, list):
+        return len(table)
+    return 0
+
+
+def _update_rate(dev_id, rx, tx):
+    now = time.time()
+    rate = None
+    with RATE_LOCK:
+        prev = RATE_STATE.get(dev_id)
+        RATE_STATE[dev_id] = (now, rx, tx)
+        hist = RATE_HISTORY.setdefault(dev_id, collections.deque(maxlen=90))
+        if prev is not None:
+            dt = now - prev[0]
+            if dt > 0.15:
+                rate = {
+                    "down": max(0.0, (rx - prev[1]) / dt),
+                    "up": max(0.0, (tx - prev[2]) / dt),
+                }
+                hist.append([int(now), round(rate["down"]), round(rate["up"])])
+        return rate, list(hist)
+
+
+def _temp_and_freq(client):
+    temp = None
+    freq = None
+    for zone in ("thermal_zone0", "thermal_zone1", "thermal_zone2"):
+        data = client.call("file", "read", {"path": "/sys/class/thermal/%s/temp" % zone})
+        raw = (data or {}).get("data") if isinstance(data, dict) else None
+        if not raw:
+            continue
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            continue
+        temp = round(value / 1000.0, 1) if value > 1000 else float(value)
+        break
+    data = client.call("file", "read", {"path": "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"})
+    raw = (data or {}).get("data") if isinstance(data, dict) else None
+    if raw:
+        try:
+            freq = int(int(str(raw).strip()) / 1000)
+        except ValueError:
+            freq = None
+    return temp, freq
+
+
+def _tiles_with_availability(client, dev_id):
+    now = time.time()
+    cache = PROBE_CACHE.get(dev_id) or {}
+
+    def available(path):
+        entry = cache.get(path)
+        if not entry or now - entry[0] > TILE_PROBE_TTL:
+            entry = [now, client.probe(path)]
+            cache[path] = entry
+        return entry[1]
+
+    tiles = [{"id": tile_id, "label": label, "path": path, "color": color,
+              "icon": icon, "available": available(path)}
+             for tile_id, label, path, color, icon in PANEL_TILES]
+    apps = [{"id": app_id, "label": label, "path": path, "color": color,
+             "icon": icon, "desc": desc, "available": available(path)}
+            for app_id, label, path, color, icon, desc in PANEL_APPS]
+    PROBE_CACHE[dev_id] = cache
+    return tiles, apps
+
+
+def build_dashboard(dev_id):
+    now = time.time()
+    cached = DASH_CACHE.get(dev_id)
+    if cached and now - cached[0] < DASH_CACHE_TTL:
+        return cached[1]
+
+    base = {"id": dev_id, "authed": False, "error": "", "ts": int(now),
+            "tiles": [{"id": t[0], "label": t[1], "path": t[2], "color": t[3],
+                       "icon": t[4], "available": None} for t in PANEL_TILES],
+            "apps": [{"id": a[0], "label": a[1], "path": a[2], "color": a[3],
+                      "icon": a[4], "desc": a[5], "available": None} for a in PANEL_APPS]}
+    client, reason = get_client(dev_id)
+    if client is None:
+        base["error"] = reason
+        return base
+
+    try:
+        raw = _call_all(client, {
+            "board": ("system", "board"),
+            "info": ("system", "info"),
+            "ifaces": ("network.interface", "dump"),
+            "leases": ("dhcp", "ipv4leases"),
+        })
+    except SessionExpired:
+        drop_session(dev_id)
+        client, reason = get_client(dev_id, force=True)
+        if client is None:
+            base["error"] = reason or "会话已过期，请重新保存账号密码"
+            return base
+        raw = _call_all(client, {
+            "board": ("system", "board"),
+            "info": ("system", "info"),
+            "ifaces": ("network.interface", "dump"),
+            "leases": ("dhcp", "ipv4leases"),
+        })
+
+    board = raw.get("board") or {}
+    info = raw.get("info") or {}
+    wan = _wan_of(raw.get("ifaces")) or {}
+    stats = wan.get("statistics") or {}
+    rx = _num(stats, "rx_bytes", default=0) or 0
+
+    rate, history = _update_rate(dev_id, rx, _num(stats, "tx_bytes", default=0) or 0)
+    temp, freq = _temp_and_freq(client)
+    tiles, apps = _tiles_with_availability(client, dev_id)
+
+    memory = info.get("memory") or {}
+    mem_total = _num(memory, "total", default=0) or 0
+    mem_free = _num(memory, "free", default=0) or 0
+    mem_avail = _num(memory, "available", default=mem_free) or mem_free
+    root = info.get("root") or {}
+    load = info.get("load") or []
+    if not isinstance(load, list):
+        load = []
+    leases = raw.get("leases") or {}
+    release = board.get("release") or {}
+    ipv4 = wan.get("ipv4-address") or []
+    wan_ip = ""
+    if isinstance(ipv4, list) and ipv4 and isinstance(ipv4[0], dict):
+        wan_ip = str(ipv4[0].get("address") or "")
+
+    base.update({
+        "authed": True,
+        "error": "",
+        "board": {
+            "model": str(board.get("model") or ""),
+            "cpu": str(board.get("cpu") or board.get("system") or ""),
+            "firmware": str(release.get("description") or release.get("distribution") or ""),
+            "kernel": str(info.get("kernelversion") or ""),
+        },
+        "system": {
+            "uptime": int(_num(info, "uptime", default=0) or 0),
+            "load": [round(float(x), 2) if isinstance(x, (int, float)) else 0 for x in load[:3]],
+        },
+        "memory": {
+            "total": mem_total, "free": mem_free, "available": mem_avail,
+            "used": max(0, mem_total - mem_avail),
+            "pct": round((mem_total - mem_avail) * 100.0 / mem_total, 1) if mem_total else 0,
+        },
+        "storage": {
+            "total": _num(root, "total", default=0) or 0,
+            "used": _num(root, "used", default=0) or 0,
+            "free": _num(root, "free", default=0) or 0,
+            "pct": round((_num(root, "used", default=0) or 0) * 100.0 / (_num(root, "total", default=0) or 1), 1),
+        },
+        "cpu": {"temp": temp, "freq": freq},
+        "wan": {
+            "iface": str(wan.get("l3_device") or wan.get("device") or wan.get("interface") or ""),
+            "proto": str(wan.get("proto") or ""),
+            "ip": wan_ip,
+            "up": bool(wan.get("up")),
+            "rx_bytes": rx,
+            "tx_bytes": _num(stats, "tx_bytes", default=0) or 0,
+        },
+        "clients": {"dhcp": _leases_count(leases)},
+        "rate": rate,
+        "history": history,
+        "tiles": tiles,
+        "apps": apps,
+    })
+    DASH_CACHE[dev_id] = (now, base)
+    return base
+
+
 # ---------------------------------------------------------------- HTTP 服务
 
 CONTENT_TYPES = {
@@ -977,7 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith(PROXY_PREFIX):
             return self._proxy()
         if path.startswith("/api/"):
-            return self._api_get(path)
+            return self._api_get(path, parsed.query)
         return self._serve_static(path)
 
     def do_POST(self):
@@ -1005,6 +1500,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(409, "已有扫描任务在进行中")
             threading.Thread(target=run_scan, args=(cidrs, gateway), daemon=True).start()
             return self._json({"ok": True, "cidrs": cidrs})
+        if path == "/api/router/login":
+            payload = self._read_json()
+            dev_id = (payload.get("id") or "").strip()
+            username = (payload.get("username") or "root").strip() or "root"
+            password = payload.get("password") or ""
+            if not dev_id:
+                return self._error(400, "缺少设备标识")
+            if not password:
+                return self._error(400, "密码不能为空")
+            ip, port, scheme = target_of(dev_id)
+            client = LuCiClient(ip, port, scheme)
+            if not client.login(username, password):
+                return self._error(400, "登录路由器失败，请检查账号密码")
+            set_credentials(dev_id, username, password)
+            with SESSIONS_LOCK:
+                SESSIONS[dev_id] = client
+            return self._json({"ok": True, "authed": True})
         if path == "/api/scan/stop":
             with STATE.lock:
                 STATE.cancel = True
@@ -1056,6 +1568,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith(PROXY_PREFIX):
             return self._proxy()
+        if parsed.path == "/api/router/login":
+            dev_id = (parse_qs(parsed.query or "").get("id") or [""])[0].strip()
+            if dev_id:
+                clear_credentials(dev_id)
+            return self._json({"ok": True})
         if parsed.path == "/api/ignored":
             dev_id = (parse_qs(parsed.query or "").get("id") or [""])[0]
             return self._json({"ids": unignore_device(dev_id)})
@@ -1072,7 +1589,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 具体处理
 
-    def _api_get(self, path):
+    def _api_get(self, path, query=""):
         if path == "/api/config":
             interfaces = list_interfaces()
             gateway = default_gateway()
@@ -1089,6 +1606,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ids": load_ignored()})
         if path == "/api/proxylog":
             return self._json({"entries": proxy_log_snapshot()})
+        if path == "/api/router/auth":
+            return self._json({"devices": credentials_status()})
+        if path == "/api/router/dashboard":
+            dev_id = (parse_qs(query or "").get("id") or [""])[0].strip()
+            if not dev_id:
+                return self._error(400, "缺少设备标识")
+            return self._json(build_dashboard(dev_id))
         if path == "/api/scan/status":
             return self._json(STATE.snapshot())
         return self._error(404, "接口不存在")
@@ -1206,6 +1730,13 @@ class Handler(BaseHTTPRequestHandler):
             headers[key] = value
         headers["Host"] = hostport
         headers["Accept-Encoding"] = "identity"
+        # 有保存的账号时，由 NAS 代带登录态，弹窗/新标签里进 LuCI 就不用再输密码
+        try:
+            session_cookie = router_proxy_cookie(host, port)
+        except Exception:
+            session_cookie = ""
+        if session_cookie:
+            headers["Cookie"] = session_cookie
         # 部分路由器会校验来源，统一改成指向目标自身
         headers["Referer"] = "%s://%s%s" % (scheme, hostport, target_path)
         headers["Origin"] = "%s://%s" % (scheme, hostport)

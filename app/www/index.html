@@ -140,15 +140,18 @@
       <span class="live-dot" aria-hidden="true"></span>
       <strong class="viewer-title" id="viewer-title">路由器</strong>
       <span class="viewer-addr" id="viewer-addr"></span>
-      <span class="viewer-mode" id="viewer-mode">中转</span>
+      <span class="viewer-mode" id="viewer-mode">面板</span>
       <div class="viewer-actions">
+        <button type="button" class="btn tiny" id="viewer-back" hidden>← 面板</button>
+        <button type="button" class="btn tiny primary" id="viewer-home">LuCI 首页</button>
         <button type="button" class="btn tiny" id="viewer-reload">刷新</button>
         <button type="button" class="btn tiny" id="viewer-log">日志</button>
         <button type="button" class="btn tiny" id="viewer-tab">新标签打开</button>
         <button type="button" class="btn tiny danger" id="viewer-close">关闭</button>
       </div>
     </div>
-    <div class="viewer-frame-wrap">
+    <div class="viewer-panel" id="viewer-panel"></div>
+    <div class="viewer-frame-wrap" id="viewer-frame-wrap" hidden>
       <iframe id="viewer-frame" title="路由器管理页面"></iframe>
       <div class="viewer-loading" id="viewer-loading">正在打开路由器管理页面…</div>
       <div class="viewer-hint" id="viewer-hint" hidden>
