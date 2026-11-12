@@ -48,6 +48,7 @@ MENU_HTML = """<!DOCTYPE html><html><head>
   <li><a href="/cgi-bin/luci/admin/system/admin">管理权</a></li>
   <li><a href="/cgi-bin/luci/admin/store/">iStore 商店</a></li>
   <li><a href="/cgi-bin/luci/admin/docker/">Docker</a></li>
+  <li><a href="/cgi-bin/luci/admin/quickstart">首页</a></li>
   <li><a href="/cgi-bin/luci/admin/logout">退出</a></li>
 </ul>
 </div>
@@ -133,7 +134,8 @@ class FakeRouter(BaseHTTPRequestHandler):
             return
         if path.startswith("/cgi-bin/luci/admin/"):
             if path in ("/cgi-bin/luci/admin/network/network",
-                        "/cgi-bin/luci/admin/network/wireless"):
+                        "/cgi-bin/luci/admin/network/wireless",
+                        "/cgi-bin/luci/admin/quickstart"):
                 self._send(200, "<html>ok</html>")
             else:
                 self._send(404, "<html>404</html>")
@@ -289,6 +291,7 @@ class PanelTestCase(unittest.TestCase):
         self.assertNotIn("退出", labels)
         self.assertEqual(dash["tiles"][0]["path"], "/cgi-bin/luci/admin/status/overview")
         self.assertEqual(dash["tiles"][0]["icon"], "grid")
+        self.assertIn("首页", labels)
         # 应用与文件：在菜单里找到 iStore / Docker，没有文件管理就不出现
         app_ids = [a["id"] for a in dash["apps"]]
         self.assertEqual(app_ids, ["istore", "docker"])
@@ -359,6 +362,41 @@ class PanelTestCase(unittest.TestCase):
             "/cgi-bin/luci/admin/system/system",
         ])
         self.assertEqual([i["label"] for i in items], ["网络", "状态总览", "系统"])
+
+    def test_06b_unprefixed_luci_path_is_routed_back_to_router(self):
+        """中转页面里用绝对路径跳转会漏掉 /proxy/ 前缀，服务端要按 Referer 接回路由器。"""
+        self.login()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            referer = "http://127.0.0.1:%d/proxy/http/127.0.0.1:%d/cgi-bin/luci/" % (self.port, self.router_port)
+            conn.request("GET", "/cgi-bin/luci/admin/status/overview", headers={"Referer": referer})
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "ignore")
+            self.assertEqual(resp.status, 200)
+            # 必须拿到路由器页面（菜单 HTML），而不是我们自己的 index.html
+            self.assertIn("L.env", body)
+            self.assertNotIn("局域网路由管理", body)
+        finally:
+            conn.close()
+
+    def test_06c_unprefixed_path_without_referer_stays_local(self):
+        """没有 Referer / 非私有地址时不做接回（避免变成任意代理跳板）。"""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request("GET", "/cgi-bin/luci/admin/status/overview")
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "ignore")
+            self.assertEqual(resp.status, 200)
+            self.assertIn("局域网路由管理", body)   # 仍然是我们自己的页面
+        finally:
+            conn.close()
+
+    def test_06d_dashboard_reports_home_path(self):
+        """首页路径来自菜单里的「首页」，不能用 `/`（中文 LuCI 会重定向到状态概览）。"""
+        self.login()
+        dash = self.dashboard()
+        self.assertEqual(dash["home"]["path"], "/cgi-bin/luci/admin/quickstart")
+        self.assertEqual(dash["home"]["label"], "首页")
 
     def test_07_viewer_has_openwrt_home_button(self):
         """弹窗顶部要有「OpenWrt 首页」按钮，且指向 LuCI 原生首页。"""

@@ -608,6 +608,8 @@ def unignore_device(dev_id):
 # 路径规则：/proxy/{scheme}/{host}:{port}/{原始路径}
 
 PROXY_PREFIX = "/proxy/"
+# 这些是路由器自己的路径：客户端漏掉 /proxy/ 前缀时要在服务端接回去
+ROUTER_PATH_RE = re.compile(r"^/(?:cgi-bin/luci|luci-static|luci/|ubus)(?:[/?]|$)")
 # 路由器上的长轮询 / 事件流可能很久才结束，超时给足
 PROXY_TIMEOUT = 65
 
@@ -1269,6 +1271,34 @@ def menu_of(client, dev_id):
     return best
 
 
+HOME_LABELS = ("首页", "主页", "home", "dashboard")
+# 中文 LuCI 上 `/` 常被 dispatcher 重定向到「状态概览」，所以首页要单独找；
+# 找不到明确首页时退回 `/`，交给路由器自己决定落哪（不硬说「概览就是首页」）。
+HOME_CANDIDATES = (
+    "/cgi-bin/luci/admin/quickstart",
+    "/cgi-bin/luci/admin/home",
+    "/cgi-bin/luci/admin/istoreos",
+)
+
+
+def home_of(client, items):
+    """返回 (路径, 名称)：菜单里的「首页」→ 常见首页路径 → `/`。"""
+    for item in items or []:
+        label = str(item.get("label") or "").strip()
+        path = str(item.get("path") or "")
+        low = label.lower()
+        if low in HOME_LABELS or "quickstart" in path or path.rstrip("/").endswith("/home"):
+            return path, label or "首页"
+    for path in HOME_CANDIDATES:
+        try:
+            status, _headers, _data = client._http("GET", path, timeout=5.0)
+        except Exception:  # noqa: BLE001
+            continue
+        if status == 200:
+            return path, "首页"
+    return "/", "首页"
+
+
 def apps_of(items):
     out = []
     for app_id, label, keywords, color, icon, desc in APP_RULES:
@@ -1539,6 +1569,7 @@ def collect_dashboard(client, dev_id):
         tiles, apps, menu_source = items, apps_of(items), "menu"
     else:
         tiles, apps, menu_source = fallback_tiles(), fallback_apps(), "fallback"
+    home_path, home_label = home_of(client, items)
 
     wan = _wan_of(dump) or {}
     wan_dev = str(wan.get("l3_device") or wan.get("device") or "")
@@ -1599,6 +1630,7 @@ def collect_dashboard(client, dev_id):
         "tiles": tiles,
         "apps": apps,
         "menu": {"source": menu_source, "count": len(tiles)},
+        "home": {"path": home_path, "label": home_label},
     }
 
 
@@ -1792,6 +1824,9 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path.startswith(PROXY_PREFIX):
             return self._proxy()
+        recovered = self._proxy_recovery(path, parsed.query)
+        if recovered:
+            return self._proxy(recovered)
         if path.startswith("/api/"):
             return self._api_get(path, parsed.query)
         return self._serve_static(path)
@@ -1802,6 +1837,9 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path.startswith(PROXY_PREFIX):
             return self._proxy()
+        recovered = self._proxy_recovery(path, parsed.query)
+        if recovered:
+            return self._proxy(recovered)
         if path == "/api/scan":
             payload = self._read_json()
             cidr = (payload.get("cidr") or "").strip()
@@ -1970,6 +2008,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 反向代理
 
+    def _proxy_recovery(self, path, query=""):
+        """漏掉 /proxy/ 前缀的路由器路径 → 按 Referer 里的中转目标接回去。"""
+        if path.startswith(PROXY_PREFIX) or not ROUTER_PATH_RE.match(path):
+            return ""
+        referer = self.headers.get("Referer") or ""
+        match = re.search(r"/proxy/(https?)/([^/?#]+)/", referer)
+        if not match:
+            return ""
+        scheme, hostport = match.group(1), match.group(2)
+        host, _, port_text = hostport.partition(":")
+        try:
+            port = int(port_text) if port_text.isdigit() else (443 if scheme == "https" else 80)
+        except ValueError:
+            return ""
+        if not allowed_proxy_host(host):
+            return ""
+        # 应用被挂在子路径下时，Referer 里前缀前还有 base，这里原样带回去
+        prefix = proxy_base(scheme, host, port)
+        base = referer.split(prefix)[0]
+        if base.endswith("/"):
+            base = base[:-1]
+        if base and not base.startswith("/"):
+            base = ""
+        target = base + prefix + path
+        if query:
+            target += "?" + query
+        log("%s 漏掉中转前缀，已接回：%s -> %s" % (self.address_string(), path, target))
+        return target
+
     def _proxy_fail(self, status, reason):
         page = PROXY_ERROR_PAGE % {"reason": reason, "home": "/"}
         self._send(status, page, "text/html; charset=utf-8")
@@ -2006,8 +2073,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(length))
         self.end_headers()
 
-    def _proxy(self):
-        parsed = urlparse(self.path)
+    def _proxy(self, override_path=None):
+        raw_path = override_path or self.path
+        parsed = urlparse(raw_path)
         rest = parsed.path[len(PROXY_PREFIX):]
         scheme, _, rest = rest.partition("/")
         hostport, _, tail = rest.partition("/")
@@ -2047,7 +2115,7 @@ class Handler(BaseHTTPRequestHandler):
         started = time.time()
         # WebSocket（部分 LuCI 页面的 ubus 订阅走 ws），直接做字节隧道
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
-            proxy_log("WS", self.path, 101, 0)
+            proxy_log("WS", raw_path, 101, 0)
             return self._proxy_websocket(host, port, scheme, hostport, target_path, prefix)
 
         body = self._read_body() or None
@@ -2087,14 +2155,14 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             log("代理失败 %s %s%s -> %s:%d (%r)" % (self.command, prefix, target_path, host, port, exc))
-            proxy_log(self.command, self.path, "ERR", time.time() - started, str(exc))
+            proxy_log(self.command, raw_path, "ERR", time.time() - started, str(exc))
             return self._proxy_fail(502, "连接 %s:%d 失败（%s）" % (host, port, exc))
 
         status = resp.status
         rheaders = resp.getheaders()
         content_type = resp.getheader("Content-Type") or ""
         encoding = (resp.getheader("Content-Encoding") or "").lower()
-        proxy_log(self.command, self.path, status, time.time() - started,
+        proxy_log(self.command, raw_path, status, time.time() - started,
                   (content_type.split(";")[0] or "")[:32])
         lower_type = content_type.lower()
         rewrite_kind = ""

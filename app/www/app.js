@@ -22,6 +22,7 @@
     viewerLoaded: false,
     viewerDirect: false,
     viewIndex: 'panel',
+    homePath: '/',
     panelTarget: null,
     panelTimer: null,
     panelSeq: 0,
@@ -270,6 +271,9 @@
     var cpu = data.cpu || {};
     var clients = data.clients || {};
     var disk = disks[0] || null;
+    state.homePath = (data.home && data.home.path) || '/';
+    var homeBtn = $('#viewer-home');
+    if (homeBtn) homeBtn.title = '打开路由器的首页（' + state.homePath + '）';
 
     html += '<div class="panel-sec">运行状态<span class="panel-sec-hint">每 3 秒刷新</span></div>';
     html += '<div class="panel-stats">';
@@ -406,12 +410,53 @@
   }
 
   // 面板/首页里点某个 LuCI 路径：按当前访问方式决定走直连还是中转
+  // 用 dev(ip:port) 兜底：card 上的 data-proxy/data-direct 万一丢了，
+  // 也不能拼出没有 /proxy/ 前缀的地址（那会打开我们自己的页面）
+  function devParts(target) {
+    var parts = String((target && target.dev) || '').split(':');
+    var port = parts[1] || '80';
+    var scheme = /^(443|8443)$/.test(port) ? 'https' : 'http';
+    return { ip: parts[0] || '', port: port, scheme: scheme };
+  }
+
+  function ensureProxyBase(target) {
+    var base = String((target && target.proxyBase) || '');
+    if (/^proxy\/https?\/[^/]+\//.test(base)) return base.replace(/\/+$/, '');
+    var dev = devParts(target);
+    if (!dev.ip) return '';
+    return 'proxy/' + dev.scheme + '/' + dev.ip + ':' + dev.port;
+  }
+
+  function ensureDirectBase(target) {
+    var base = String((target && target.directBase) || '');
+    if (/^https?:\/\/[^/]+/.test(base)) return base.replace(/\/+$/, '');
+    var dev = devParts(target);
+    if (!dev.ip) return '';
+    var defaultPort = (dev.scheme === 'https' && dev.port === '443') || (dev.scheme === 'http' && dev.port === '80');
+    return dev.scheme + '://' + (defaultPort ? dev.ip : dev.ip + ':' + dev.port);
+  }
+
+  // 「直连地址」其实指向本应用时，说明拼错了，只能走中转
+  function pointsAtApp(url) {
+    try {
+      return new URL(url, location.href).host === location.host;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function openFrameFor(path) {
     var target = state.panelTarget;
     if (!target) return;
-    var directUrl = target.directBase + path;
-    var proxyUrl = target.proxyBase + path;
+    var directUrl = ensureDirectBase(target) + path;
+    var proxyUrl = ensureProxyBase(target) + path;
     var seq = state.viewerSeq;
+    if (!ensureProxyBase(target) || pointsAtApp(directUrl)) {
+      // 只有中转地址可靠
+      setChannel('中转');
+      showFrameView(proxyUrl, false);
+      return;
+    }
 
     function useProxy() {
       setChannel('中转');
@@ -471,6 +516,10 @@
   }
 
   function loadFrame(url, isDirect) {
+    if (!/^(proxy\/|\/proxy\/|https?:\/\/)/.test(String(url || ''))) {
+      toast('跳转地址异常：' + url, 'err');
+      return;
+    }
     var frame = viewerFrame();
     state.viewerUrl = url;
     state.viewerLoaded = false;
@@ -911,7 +960,7 @@
       $('#viewer-panel').innerHTML = '';
       showPanelView();
     });
-    $('#viewer-home').addEventListener('click', function () { openFrameFor('/'); });
+    $('#viewer-home').addEventListener('click', function () { openFrameFor(state.homePath || '/'); });
     // OpenWrt 原生首页 = LuCI 的状态总览，不是 iStoreOS 那套首页
     $('#viewer-owrt').addEventListener('click', function () {
       openFrameFor('/cgi-bin/luci/admin/status/overview');
