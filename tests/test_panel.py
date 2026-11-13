@@ -465,6 +465,9 @@ class PanelTestCase(unittest.TestCase):
             conn.close()
         self.assertIn("/cgi-bin/luci/admin/status/overview", js)
         self.assertIn("viewer-owrt", js)
+        # 弹窗里一律走中转（跨站 iframe 的第三方 cookie 会让直连登录失效）
+        self.assertIn("showFrameView(proxyBase + path, false)", js)
+        self.assertNotIn("probeDirect(directUrl)", js)
 
     def test_07b_non_openwrt_skips_panel(self):
         """非 OpenWrt 设备不进面板（不该弹账号密码），直接打开它的页面。"""

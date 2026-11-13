@@ -466,45 +466,18 @@
     }
   }
 
+  // 弹窗里一律走 NAS 中转：跨站 iframe 里浏览器会把路由器的 sysauth cookie 当第三方 cookie 拦掉，
+  // 直连时登录“点了没反应、一直停在登录页”。直连/自动只影响「新标签打开」（顶层标签页是 first-party，没问题）。
   function openFrameFor(path) {
     var target = state.panelTarget;
     if (!target) return;
-    var directUrl = ensureDirectBase(target) + path;
-    var proxyUrl = ensureProxyBase(target) + path;
-    var seq = state.viewerSeq;
-    if (!ensureProxyBase(target) || pointsAtApp(directUrl)) {
-      // 只有中转地址可靠
-      setChannel('中转');
-      showFrameView(proxyUrl, false);
+    var proxyBase = ensureProxyBase(target);
+    if (!proxyBase) {
+      toast('无法确定中转地址，请重新打开该设备', 'err');
       return;
     }
-
-    function useProxy() {
-      setChannel('中转');
-      showFrameView(proxyUrl, false);
-    }
-
-    if (state.mode === 'direct') {
-      setChannel('直连', true);
-      showFrameView(directUrl, true);
-      return;
-    }
-    if (state.mode === 'proxy') { useProxy(); return; }
-
-    setChannel('自动');
-    var host = hostOf(directUrl);
-    if (!pageIsLocal() || directRecentlyFailed(host)) { useProxy(); return; }
-    probeDirect(directUrl).then(function (ok) {
-      if (seq !== state.viewerSeq) return;
-      if (ok) {
-        setChannel('直连', true);
-        showFrameView(directUrl, true);
-        return;
-      }
-      if (host) state.directFail[host] = Date.now();
-      setChannel('中转');
-      showFrameView(proxyUrl, false);
-    });
+    setChannel('中转');
+    showFrameView(proxyBase + path, false);
   }
 
   /* ------------------------------------------------ 应用内弹窗查看 */
@@ -518,6 +491,9 @@
     tag.textContent = text;
     tag.classList.remove('panel');
     tag.classList.toggle('direct', !!isDirect);
+    tag.title = text === '中转'
+      ? '弹窗内始终经 NAS 中转（跨站 iframe 会被拦第三方 cookie，直连时路由器登录会一直停在登录页）'
+      : '';
   }
 
   // 当前页面本身是不是在内网地址上打开的；不是（公网域名/远程访问）就说明浏览器到不了内网
