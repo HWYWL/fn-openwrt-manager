@@ -108,16 +108,20 @@ def read_changelog_items(manifest_path, version):
     except OSError:
         return []
     parts = [p.strip() for p in re.split(r"[；;]", text) if p.strip()]
-    items = []
-    for part in parts[:3]:
+    entries = []       # [[版本号, 说明], ...]
+    for part in parts:
         m = re.match(r"(v?[0-9][0-9.\-a-zA-Z]*)\s*[：:]\s*(.+)", part)
         if m:
-            items.append("- **%s** %s" % (m.group(1), m.group(2).strip()))
+            entries.append([m.group(1), m.group(2).strip()])
+        elif entries:
+            # 没有版本号的片段是上一版的续写，接回去而不是单独一行
+            entries[-1][1] += "；" + part
         else:
-            items.append("- %s" % part)
-    if not items:
-        items = ["- 详见仓库提交记录"]
-    return items
+            entries.append(["", part])
+    entries = entries[:3]
+    if not entries:
+        return ["- 详见仓库提交记录"]
+    return ["- **%s** %s" % (ver, note) if ver else "- %s" % note for ver, note in entries]
 
 
 def build_body(app, version, asset_path, manifest_path, notes_file):
