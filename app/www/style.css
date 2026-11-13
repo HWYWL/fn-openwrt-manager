@@ -766,6 +766,8 @@ dialog input:focus { border-color: var(--accent-line); background: var(--input-f
 .panel-note.err { background: var(--danger-soft); border-color: var(--danger-line); }
 .panel-note.err b { color: var(--danger); }
 
+.panel-direct { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+
 .panel-login {
   display: grid;
   grid-template-columns: 1.6fr 1fr 1fr auto auto;
@@ -972,7 +974,9 @@ dialog input:focus { border-color: var(--accent-line); background: var(--input-f
   .viewer-panel { padding: 12px 12px calc(16px + env(safe-area-inset-bottom, 0px)); }
   .panel-stats, .panel-res, .panel-apps { grid-template-columns: 1fr; gap: 10px; }
   .panel-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .panel-login { grid-template-columns: 1fr; align-items: stretch; }
+  .panel-direct { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+
+.panel-login { grid-template-columns: 1fr; align-items: stretch; }
   .panel-rate b { font-size: 22px; }
   .panel-rate { gap: 16px; }
   .viewer-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }

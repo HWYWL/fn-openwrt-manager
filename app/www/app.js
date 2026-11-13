@@ -23,6 +23,7 @@
     viewerDirect: false,
     viewIndex: 'panel',
     noPanel: false,
+    forceDirect: false,
     homePath: '/',
     panelTarget: null,
     panelTimer: null,
@@ -255,7 +256,22 @@
     var dev = (state.panelTarget && state.panelTarget.dev) || '';
     var html = '';
 
+    state.forceDirect = state.forceDirect || data.nas_reachable === false;
+
     if (!data.authed) {
+      if (data.nas_reachable === false) {
+        // NAS 到不了这台设备：账号密码面板没意义，直接给打开方式
+        html += '<div class="panel-note"><b>NAS 连不到这台设备</b><span>' +
+          '（NAS 与它不在同一网络，或端口不通）只能从当前浏览器直连打开。' +
+          '直连时如果登录后还停在登录页，用「新标签打开」即可。</span></div>' +
+          '<div class="panel-direct">' +
+          '<button type="button" class="btn primary js-direct-open">在弹窗里直连打开</button>' +
+          '<button type="button" class="btn js-newtab">新标签打开（可登录）</button>' +
+          '</div>';
+        box.innerHTML = html;
+        box.scrollTop = scrollTop;
+        return;
+      }
       html += '<div class="panel-note"><b>未连接</b><span>' +
         esc(data.error || '还没有保存这台路由器的账号密码') + '</span></div>' + panelLoginForm(dev);
       box.innerHTML = html;
@@ -471,6 +487,18 @@
   function openFrameFor(path) {
     var target = state.panelTarget;
     if (!target) return;
+    // NAS 连不到这台设备时只能用浏览器直连（弹窗里登录可能被第三方 cookie 拦，见提示条）
+    if (state.forceDirect) {
+      var directBase = ensureDirectBase(target);
+      if (!directBase) {
+        toast('无法确定设备地址，请重新打开该设备', 'err');
+        return;
+      }
+      setChannel('直连', true);
+      showFrameView(directBase + path, true);
+      showDirectHint();
+      return;
+    }
     var proxyBase = ensureProxyBase(target);
     if (!proxyBase) {
       toast('无法确定中转地址，请重新打开该设备', 'err');
@@ -478,6 +506,16 @@
     }
     setChannel('中转');
     showFrameView(proxyBase + path, false);
+  }
+
+  // 直连时提示“登录不了就用新标签打开”
+  function showDirectHint() {
+    var hint = $('#viewer-hint');
+    var text = hint.querySelector('span');
+    var btn = $('#viewer-switch');
+    if (text) text.textContent = 'NAS 连不到这台设备，弹窗内是浏览器直连；如果登录后仍停在登录页，请点右边按钮在新标签页打开。';
+    if (btn) btn.textContent = '新标签打开';
+    hint.hidden = false;
   }
 
   /* ------------------------------------------------ 应用内弹窗查看 */
@@ -556,6 +594,7 @@
     state.viewerProxy = opts.proxy;
     // 只有 OpenWrt/LuCI 设备才需要面板（面板数据要靠 LuCI 会话）；其他设备直接开页面
     state.noPanel = String(opts.kind || '') !== 'openwrt';
+    state.forceDirect = state.noPanel;   // 普通 Web 页没有面板，直接开页面
     $('#viewer-title').textContent = opts.title || '路由器';
     $('#viewer-addr').textContent = opts.addr || '';
     $('#viewer-panel').innerHTML = '<div class="panel-loading">正在读取路由器状态…</div>';
@@ -976,6 +1015,15 @@
         openFrameFor(tile.dataset.path || '/');
         return;
       }
+      if (event.target.closest('.js-direct-open')) {
+        openFrameFor('/');
+        return;
+      }
+      if (event.target.closest('.js-newtab')) {
+        var t = state.panelTarget;
+        if (t) window.open(ensureDirectBase(t) + '/', '_blank', 'noopener');
+        return;
+      }
       if (event.target.closest('#panel-login-clear')) {
         var dev = (state.panelTarget && state.panelTarget.dev) || '';
         api('router/login?id=' + encodeURIComponent(dev), { method: 'DELETE' }).then(function () {
@@ -1009,6 +1057,11 @@
         });
     });
     $('#viewer-switch').addEventListener('click', function () {
+      if (state.forceDirect) {
+        var t = state.panelTarget;
+        if (t) window.open(ensureDirectBase(t) + '/', '_blank', 'noopener');
+        return;
+      }
       if (!state.viewerProxy) return;
       setChannel('中转');
       showFrameView(state.viewerProxy, false);

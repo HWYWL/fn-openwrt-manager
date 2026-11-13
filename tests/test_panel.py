@@ -445,6 +445,17 @@ class PanelTestCase(unittest.TestCase):
         self.assertIn(dash["menu"]["source"], ("menu", "mixed"))
         self.assertIn("from_menu", dash["menu"])
 
+    def test_06f_nas_reachability_is_reported(self):
+        """面板要知道 NAS 能不能连到这台设备（连不上就只能让浏览器直连）。"""
+        self.login()
+        dash = self.dashboard()
+        self.assertIs(dash.get("nas_reachable"), True)     # 假路由器就在本机，能连上
+
+        down = "127.0.0.1:1"                               # 没人监听的端口
+        status, data = self.call("GET", "/api/router/dashboard?id=" + down)
+        self.assertEqual(status, 200)
+        self.assertIs(data.get("nas_reachable"), False)
+
     def test_07_viewer_has_openwrt_home_button(self):
         """弹窗顶部要有「OpenWrt 首页」按钮，且指向 LuCI 原生首页。"""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -468,6 +479,9 @@ class PanelTestCase(unittest.TestCase):
         # 弹窗里一律走中转（跨站 iframe 的第三方 cookie 会让直连登录失效）
         self.assertIn("showFrameView(proxyBase + path, false)", js)
         self.assertNotIn("probeDirect(directUrl)", js)
+        # NAS 连不上时退回浏览器直连，并提示用新标签打开
+        self.assertIn("state.forceDirect", js)
+        self.assertIn("js-newtab", js)
 
     def test_07b_non_openwrt_skips_panel(self):
         """非 OpenWrt 设备不进面板（不该弹账号密码），直接打开它的页面。"""

@@ -1114,6 +1114,21 @@ def get_client(dev_id, force=False):
     return client, ""
 
 
+REACH_CACHE = {}
+
+
+def nas_reachable(dev_id):
+    """NAS 自己能不能连到这台设备（连不上就只能让浏览器直连）。"""
+    now = time.time()
+    hit = REACH_CACHE.get(dev_id)
+    if hit and now - hit[0] < 20:
+        return hit[1]
+    ip, port, _scheme = target_of(dev_id)
+    ok = bool(ip) and tcp_open(ip, port, timeout=0.8)
+    REACH_CACHE[dev_id] = (now, ok)
+    return ok
+
+
 def router_proxy_cookie(ip, port):
     """中转自动登录：有这个设备的凭据就返回 sysauth cookie，否则空。"""
     dev_id = "%s:%d" % (ip, port)
@@ -1739,7 +1754,8 @@ def build_dashboard(dev_id):
     if cached and now - cached[0] < DASH_CACHE_TTL:
         return cached[1]
 
-    base = {"id": dev_id, "authed": False, "error": "", "ts": int(now), "tiles": [], "apps": []}
+    base = {"id": dev_id, "authed": False, "error": "", "ts": int(now), "tiles": [], "apps": [],
+            "nas_reachable": nas_reachable(dev_id)}
     client, reason = get_client(dev_id)
     if client is None:
         base["error"] = reason
