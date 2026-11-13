@@ -57,6 +57,10 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "⚠️  工作区有未提交的改动，发布会包含未提交的代码（tag 仍指向最后一次提交）。"
 fi
 
+# 清掉测试/预览跑出来的 pyc，否则会被 fnpack 打进包里（实测多出 60KB）
+find "$ROOT" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$ROOT" -name "*.pyc" -delete 2>/dev/null || true
+
 echo "==> 打包 $APP_NAME $VERSION"
 BUILD_PARENT=$(dirname "$ROOT")
 FPK="$BUILD_PARENT/$APP_NAME.fpk"
