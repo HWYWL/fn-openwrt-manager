@@ -57,9 +57,29 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "⚠️  工作区有未提交的改动，发布会包含未提交的代码（tag 仍指向最后一次提交）。"
 fi
 
-# 清掉测试/预览跑出来的 pyc，否则会被 fnpack 打进包里（实测多出 60KB）
-find "$ROOT" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
-find "$ROOT" -name "*.pyc" -delete 2>/dev/null || true
+# 清掉测试/预览跑出来的 pyc，否则会被 fnpack 打进包里（实测多出 60KB）。
+# 用 python 遍历而不是 find：Windows 上 find 有可能解析成 C:\Windows\System32ind.exe。
+"$PY" - "$ROOT" <<'PYEOF'
+import os, shutil, sys
+root = sys.argv[1]
+removed = 0
+for base, dirs, files in os.walk(root):
+    if '.git' in base.split(os.sep):
+        continue
+    for name in list(dirs):
+        if name == '__pycache__':
+            shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+            dirs.remove(name)
+            removed += 1
+    for name in files:
+        if name.endswith('.pyc'):
+            try:
+                os.remove(os.path.join(base, name))
+                removed += 1
+            except OSError:
+                pass
+print('==> 清理 __pycache__ / *.pyc：%d 处' % removed)
+PYEOF
 
 echo "==> 打包 $APP_NAME $VERSION"
 BUILD_PARENT=$(dirname "$ROOT")

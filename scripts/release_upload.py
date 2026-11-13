@@ -190,11 +190,17 @@ def main():
         "draft": bool(args.draft),
         "prerelease": False,
     })
-    if status == 422:          # tag 已存在 → 复用已有 release
+    if status == 422:          # tag 已存在 → 复用已有 release，并把正文刷新成这次的（含新哈希）
         status, text = api(token, "GET",
                            "https://api.github.com/repos/%s/releases/tags/%s" % (args.repo, tag))
         if status == 200:
-            print("release 已存在，复用：%s" % tag)
+            existing = json.loads(text)
+            print("release 已存在，复用并刷新正文：%s" % tag)
+            status, text = api(token, "PATCH",
+                               "https://api.github.com/repos/%s/releases/%d" % (args.repo, existing["id"]),
+                               {"name": title, "body": body})
+            if status not in (200, 201):
+                print("⚠️ 刷新正文失败：HTTP %s" % status)
     if status not in (200, 201):
         sys.exit("创建 release 失败：HTTP %s\n%s" % (status, text[:400]))
 
