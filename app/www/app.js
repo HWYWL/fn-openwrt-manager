@@ -24,6 +24,8 @@
     viewIndex: 'panel',
     noPanel: false,
     forceDirect: false,
+    // NAS 确认连不到这台设备（只能浏览器直连，弹窗里登录必然掉 cookie）
+    directUnreachable: false,
     homePath: '/',
     panelTarget: null,
     panelTimer: null,
@@ -257,6 +259,7 @@
     var html = '';
 
     state.forceDirect = state.forceDirect || data.nas_reachable === false;
+    if (data.nas_reachable === false) state.directUnreachable = true;
 
     if (!data.authed) {
       if (data.nas_reachable === false) {
@@ -497,7 +500,7 @@
       }
       setChannel('直连', true);
       showFrameView(directBase + path, true);
-      showDirectHint();
+      showDirectHint(state.directUnreachable);
       return;
     }
     var proxyBase = ensureProxyBase(target);
@@ -510,12 +513,19 @@
   }
 
   // 直连时提示“登录不了就用新标签打开”
-  function showDirectHint() {
+  // 跨站 iframe 里浏览器会把路由器的 sysauth cookie 当第三方 cookie 丢掉：
+  // 密码对了也会被 302 送回登录页，所以直连只能在顶层标签页登录。
+  function showDirectHint(unreachable) {
     var hint = $('#viewer-hint');
     var text = hint.querySelector('span');
     var btn = $('#viewer-switch');
-    if (text) text.textContent = 'NAS 连不到这台设备，弹窗内是浏览器直连；如果登录后仍停在登录页，请点右边按钮在新标签页打开。';
-    if (btn) btn.textContent = '新标签打开';
+    if (text) {
+      text.textContent = (unreachable === undefined ? state.directUnreachable : unreachable)
+        ? 'NAS 连不到这台设备，弹窗内是浏览器直连；浏览器会拦掉路由器的登录 cookie，密码对了也会停在登录页——请点右边按钮在新标签页登录。'
+        : '弹窗内是浏览器直连，浏览器可能拦掉路由器的登录 cookie（密码对了也会停在登录页）；登录不了请点右边按钮在新标签页打开。';
+    }
+    if (btn) btn.textContent = '新标签页登录';
+    hint.dataset.action = 'newtab';
     hint.hidden = false;
   }
 
@@ -578,7 +588,10 @@
       clearTimeout(state.frameTimer);
       clearTimeout(state.frameHintTimer);
       $('#viewer-loading').hidden = true;
-      $('#viewer-hint').hidden = true;
+      // 直连的提示不能随页面加载完一起收掉：登录页 onload 也会触发，
+      // 用户需要一直看得到「在新标签页登录」这个出口
+      if (state.viewerDirect && (state.forceDirect || state.directUnreachable)) showDirectHint();
+      else $('#viewer-hint').hidden = true;
     };
     frame.src = url;
   }
@@ -593,6 +606,7 @@
     };
     state.panelSeq = 0;
     state.viewerProxy = opts.proxy;
+    state.directUnreachable = false;
     // 只有 OpenWrt/LuCI 设备才需要面板（面板数据要靠 LuCI 会话）；其他设备直接开页面
     state.noPanel = String(opts.kind || '') !== 'openwrt';
     state.forceDirect = state.noPanel;   // 普通 Web 页没有面板，直接开页面
@@ -602,6 +616,17 @@
     if (!dialog.open) dialog.showModal();
     if (state.noPanel) {
       openFrameFor('/');
+      // 这类设备没有面板可比对，单独问一次 NAS 能不能连到它：
+      // 连不到时弹窗里是浏览器直连，登录 cookie 会被拦掉，先提醒一声
+      var devId = state.panelTarget && state.panelTarget.dev;
+      if (devId) {
+        api('router/dashboard?id=' + encodeURIComponent(devId)).then(function (data) {
+          if (!data || data.nas_reachable !== false) return;
+          state.directUnreachable = true;
+          if (state.viewIndex === 'frame' && state.viewerDirect) showDirectHint(true);
+          toast('NAS 连不到这台设备，弹窗内登录会被浏览器拦掉，请用「新标签页登录」', 'err');
+        }).catch(function () {});
+      }
       return;
     }
     showPanelView();
@@ -1058,9 +1083,14 @@
         });
     });
     $('#viewer-switch').addEventListener('click', function () {
-      if (state.forceDirect) {
+      // 提示条有两种用途：直连时引导去顶层标签页登录；其它情况是改用 NAS 中转
+      var hint = $('#viewer-hint');
+      if (hint.dataset.action === 'newtab' || state.forceDirect || state.viewerDirect) {
         var t = state.panelTarget;
-        if (t) window.open(ensureDirectBase(t) + '/', '_blank', 'noopener');
+        var url = /^https?:\/\//.test(state.viewerUrl || '')
+          ? state.viewerUrl
+          : (t ? ensureDirectBase(t) + '/' : '');
+        if (url) window.open(url, '_blank', 'noopener');
         return;
       }
       if (!state.viewerProxy) return;
@@ -1085,8 +1115,10 @@
       clearTimeout(state.frameHintTimer);
       state.viewerUrl = '';
       state.panelTarget = null;
+      state.directUnreachable = false;
       $('#viewer-panel').innerHTML = '';
       $('#viewer-hint').hidden = true;
+      $('#viewer-hint').dataset.action = '';
     });
     viewer.addEventListener('click', function (event) {
       if (event.target === viewer) closeViewer();
