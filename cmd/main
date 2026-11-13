@@ -7,7 +7,7 @@ APP_ROOT="${TRIM_APPDEST:-/var/apps/fn-openwrt-manager/target}"
 WWW_DIR="${APP_ROOT}/www"
 SERVER_PY="${APP_ROOT}/server/app.py"
 DATA_DIR="${TRIM_PKGVAR}/data"
-PORT="${TRIM_SERVICE_PORT:-8199}"
+PORT="${TRIM_SERVICE_PORT:-18199}"
 
 mkdir -p "${DATA_DIR}" 2>/dev/null
 

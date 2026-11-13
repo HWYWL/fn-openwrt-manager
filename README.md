@@ -74,11 +74,11 @@
 ## 目录结构
 
 ```
-manifest              应用信息（service_port = 8199）
+manifest              应用信息（service_port = 18199）
 cmd/main              启停脚本：探测 python3 → 启动 app/server/app.py
 app/server/app.py     后端（纯 Python 标准库：HTTP 服务 + 网段识别 + 扫描 + 中转 + 面板数据）
 app/www/              前端页面（原生 HTML/CSS/JS，无构建步骤）
-app/ui/config         桌面入口（type = iframe，在飞牛桌面窗口内打开 http://<NAS>:8199/）
+app/ui/config         桌面入口（type = iframe，在飞牛桌面窗口内打开 http://<NAS>:18199/）
 tests/                回归测试（标准库 unittest：中转发帧、路径改写、面板登录与取数）
 config/               权限与资源配置
 ```
@@ -86,8 +86,8 @@ config/               权限与资源配置
 ## 本地调试
 
 ```bash
-APP_PORT=8199 APP_WWW_DIR=./app/www APP_DATA_DIR=./data python3 app/server/app.py
-# 打开 http://127.0.0.1:8199
+APP_PORT=18199 APP_WWW_DIR=./app/www APP_DATA_DIR=./data python3 app/server/app.py
+# 打开 http://127.0.0.1:18199
 ```
 
 ```bash
@@ -144,7 +144,7 @@ fnpack build fn-openwrt-manager
   变成 `400 + HTML`。LuCI 的批量 RPC 拿到非 JSON 数组的响应就会在页面上报
   `Error: No related RPC reply`——所以“读满 body”不是优化，是正确性要求。
 - 注入脚本除了改写以 `/` 开头的相对路径，也会改写**指向本应用的绝对地址**：LuCI 的
-  `Request.expandURL()` 会把 RPC 地址（默认 `/ubus/`）展开成 `http://<NAS>:8199/ubus/`，
+  `Request.expandURL()` 会把 RPC 地址（默认 `/ubus/`）展开成 `http://<NAS>:18199/ubus/`，
   绕过 `/proxy/...` 前缀（LuCI 至今不支持子路径反代），注入脚本会把它补回中转路径。
   同一套改写覆盖 XHR / `fetch` / `EventSource` / `WebSocket`。
 - 排查问题：点页面底部的版本号可打开「中转请求日志」，实时显示最近 200 条中转请求

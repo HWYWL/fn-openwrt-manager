@@ -43,7 +43,7 @@ APP_VERSION = os.environ.get("APP_VERSION") or "1.0.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WWW_DIR = os.environ.get("APP_WWW_DIR") or os.path.join(os.path.dirname(BASE_DIR), "www")
 DATA_DIR = os.environ.get("APP_DATA_DIR") or os.path.join(os.path.dirname(BASE_DIR), "data")
-PORT = int(os.environ.get("APP_PORT") or 8199)
+PORT = int(os.environ.get("APP_PORT") or 18199)
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 
 # 扫描时尝试的端口，越靠前优先级越高
@@ -650,7 +650,7 @@ PROXY_SHIM = r"""
     if (u.indexOf(P) === 0) return u;
     if (u.charAt(0) === "/" && u.charAt(1) !== "/") return P + u;
     // 绝对地址但仍指向本应用：LuCI 会用 location.origin 把 RPC 地址展开成
-    // http://<NAS>:8199/ubus/（它不支持子路径挂载），这里把路径补上前缀。
+    // http://<NAS>:18199/ubus/（它不支持子路径挂载），这里把路径补上前缀。
     if (u.indexOf(ORIGIN + "/") === 0) {
       var tail = u.slice(ORIGIN.length);
       if (tail.indexOf(P) === 0) return u;
