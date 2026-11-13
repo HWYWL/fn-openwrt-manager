@@ -262,11 +262,12 @@
       if (data.nas_reachable === false) {
         // NAS 到不了这台设备：账号密码面板没意义，直接给打开方式
         html += '<div class="panel-note"><b>NAS 连不到这台设备</b><span>' +
-          '（NAS 与它不在同一网络，或端口不通）只能从当前浏览器直连打开。' +
-          '直连时如果登录后还停在登录页，用「新标签打开」即可。</span></div>' +
+          '（NAS 与它不在同一网络，或端口不通）中转不了。浏览器安全策略也不允许跨站 iframe 保存路由器的登录 cookie，' +
+          '所以<b>弹窗内直连会卡在登录页</b>——请用「新标签打开并登录」。' +
+          '</span></div>' +
           '<div class="panel-direct">' +
-          '<button type="button" class="btn primary js-direct-open">在弹窗里直连打开</button>' +
-          '<button type="button" class="btn js-newtab">新标签打开（可登录）</button>' +
+          '<button type="button" class="btn primary js-newtab">新标签打开并登录</button>' +
+          '<button type="button" class="btn js-direct-open">在弹窗里直连打开</button>' +
           '</div>';
         box.innerHTML = html;
         box.scrollTop = scrollTop;
@@ -1067,7 +1068,15 @@
       showFrameView(state.viewerProxy, false);
     });
     $('#viewer-tab').addEventListener('click', function () {
-      if (state.viewerUrl) window.open(state.viewerUrl, '_blank', 'noopener');
+      if (state.viewerUrl) {
+        window.open(state.viewerUrl, '_blank', 'noopener');
+        return;
+      }
+      // 面板视图里还没加载任何页面：直接开设备首页（直连优先，中转兜底）
+      var target = state.panelTarget;
+      if (!target) return;
+      var url = ensureDirectBase(target) || ensureProxyBase(target);
+      if (url) window.open(url + '/', '_blank', 'noopener');
     });
     viewer.addEventListener('close', function () {
       stopPanelPolling();
